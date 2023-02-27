@@ -106,4 +106,4 @@ dependencies:
     - tqdm==4.64.1
     - transformers==3.1.0
     - urllib3==1.26.12
-prefix: /nas/home/ihunghsu/miniconda3/envs/degree
+prefix: /home/xcliao/anaconda3/envs/degree

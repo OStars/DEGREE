@@ -1,0 +1,23 @@
+{
+    "dataset": "ace05ep",
+    "gpu_device": 1,
+    "seed": 0,
+    "data_dir": "./processed_data/ace05ep_bart/",
+    "train_file": "./processed_data/ace05ep_bart/train.w1.oneie.json",
+    "dev_file": "./processed_data/ace05ep_bart/dev.w1.oneie.json",
+    "test_file": "./processed_data/ace05ep_bart/test.w1.oneie.json",
+    "output_dir": "./output/keywords_ace05ep/",
+    "cache_dir": "/shared_data/pretrained_models",
+    "keyword_model_name": "bert-large-uncased",
+    "n_negative": 15, 
+    "max_epoch": 45,
+    "warmup_epoch": 5,
+    "train_batch_size": 32,
+    "eval_batch_size": 16,
+    "accumulate_step": 1,
+    "learning_rate": 1e-05,
+    "weight_decay": 1e-05,
+    "grad_clipping": 5.0,
+    "dropout": 0.3,
+    "max_length": 250
+}

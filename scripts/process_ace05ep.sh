@@ -1,4 +1,4 @@
-export ACE_PATH="../../Dataset/ace_2005_td_v7/data/"
+export ACE_PATH="../../datasets/ace_2005_td_v7/data/"
 export OUTPUT_PATH="./processed_data/ace05ep_bart"
 
 mkdir $OUTPUT_PATH

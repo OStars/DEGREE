@@ -28,7 +28,7 @@ from nltk import (sent_tokenize as sent_tokenize_,
 import stanza
 
 #nlp_ar = stanza.Pipeline(lang='ar', processors='tokenize')
-nlp_en = stanza.Pipeline(lang='en', processors='tokenize')
+nlp_en = stanza.Pipeline(lang='en', processors='tokenize', download_method=1)
 #nlp_zh = stanza.Pipeline(lang='zh', processors='tokenize')
 
 TAG_PATTERN = re.compile('<[^<>]+>', re.MULTILINE)
@@ -1300,6 +1300,7 @@ def convert_to_oneie(input_path: str,
     """
     print('Converting the dataset to OneIE format')
     skip_num = 0
+    event_types = set()
     with open(input_path, 'r', encoding='utf-8') as r, \
             open(output_path, 'w', encoding='utf-8') as w:
         for line in r:
@@ -1389,6 +1390,8 @@ def convert_to_oneie(input_path: str,
                             } for arg in event['arguments']
                         ]
                     })
+                    event_types.add('{}:{}'.format(event['event_type'],
+                                                     event['event_subtype']))
 
                 # coreference
                 corefs = []
@@ -1449,6 +1452,7 @@ def convert_to_oneie(input_path: str,
                 }
                 w.write(json.dumps(sent_obj) + '\n')
     print('skip num: {}'.format(skip_num))
+    return event_types
 
 
 def split_data(input_file: str,
@@ -1552,8 +1556,13 @@ if __name__ == '__main__':
 
         # Convert to OneIE format
         oneie_path = os.path.join(args.output, '{}.{}.oneie.json'.format(args.lang, f_size))
-        convert_to_oneie(json_path, oneie_path, args.lang, tokenizer=tokenizer)
+        event_types = convert_to_oneie(json_path, oneie_path, args.lang, tokenizer=tokenizer)
 
         # Split the data
         if args.split:
             split_data(oneie_path, args.output, args.split, args.window)
+        
+        with open(os.path.join(args.output, 'etypes.json'), 'w') as fout:
+            event_types = {'Event_type': list(event_types)}
+            event_types['Keyword_type'] = ['O', 'B-keyword', 'I-keyword']
+            json.dump(event_types, fp=fout)
