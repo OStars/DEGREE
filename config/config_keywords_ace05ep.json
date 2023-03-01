@@ -2,7 +2,6 @@
     "dataset": "ace05ep",
     "gpu_device": 1,
     "seed": 0,
-    "data_dir": "./processed_data/ace05ep_bart/",
     "train_file": "./processed_data/ace05ep_bart/train.w1.oneie.json",
     "dev_file": "./processed_data/ace05ep_bart/dev.w1.oneie.json",
     "test_file": "./processed_data/ace05ep_bart/test.w1.oneie.json",

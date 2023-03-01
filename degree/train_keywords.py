@@ -46,7 +46,7 @@ best_model_path = os.path.join(output_dir, 'best_model.mdl')
 dev_prediction_path = os.path.join(output_dir, 'pred.dev.json')
 test_prediction_path = os.path.join(output_dir, 'pred.test.json')
 
-with open(os.path.join(config.data_dir, "etypes.json"), 'r') as f:
+with open(os.path.join(os.path.dirname(config.train_file), "etypes.json"), 'r') as f:
     mapping = {
         "id_to_keyword": {}, 
         "keyword_to_id": {},

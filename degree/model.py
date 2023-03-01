@@ -77,6 +77,7 @@ class NERModel(nn.Module):
         
         return log_likelihood
     
+    @torch.no_grad()
     def predict(self, batch):
         embeddings = self.get_bert_embedding(batch)
 
