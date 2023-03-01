@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from model import GenerativeModel
-from degree.dataset import GenDataset, EEDataset
+from dataset import GenDataset, EEDataset
 from utils import compute_f1
 from argparse import ArgumentParser, Namespace
 import ipdb

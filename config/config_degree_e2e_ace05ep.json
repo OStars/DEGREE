@@ -20,7 +20,7 @@
     "n_negative": 15, 
     "max_epoch": 45,
     "warmup_epoch": 5,
-    "train_batch_size": 16,
+    "train_batch_size": 32,
     "eval_batch_size": 12,
     "accumulate_step": 1,
     "learning_rate": 1e-05,
