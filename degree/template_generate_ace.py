@@ -1,5 +1,8 @@
 import sys
 import ipdb
+import torch
+from dataset import NERBatch
+from utils import convert_tag_sequence_to_span
 
 INPUT_STYLE_SET = ['event_type', 'event_type_sent', 'keywords', 'triggers', 'template']
 OUTPUT_STYLE_SET = ['trigger:sentence', 'argument:sentence']
@@ -28,7 +31,8 @@ ROLE_PH_MAP = {
 }
 
 class eve_template_generator():
-    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False):
+    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, mapping,
+                 keyword_tokenizer=None, keyword_model=None, instance_base=False, obj_template_module=False):
         """
         generate strctured information for events
         
@@ -47,12 +51,13 @@ class eve_template_generator():
         self.input_style = input_style
         self.output_style = output_style
         self.vocab = vocab
+        self.mapping = mapping
         self.event_templates = []
         if instance_base:
             for e_type in self.vocab['event_type_itos']:
                 theclass = getattr(sys.modules[__name__], e_type.replace(':', '_').replace('-', '_'), False)
                 if theclass:
-                    self.event_templates.append(theclass(self.input_style, self.output_style, passage, e_type, self.events))
+                    self.event_templates.append(theclass(self.input_style, self.output_style, passage, e_type, self.events, self.mapping))
                 else:
                     print(e_type)
 
@@ -60,8 +65,8 @@ class eve_template_generator():
             for event in self.events:
                 theclass = getattr(sys.modules[__name__], event['event type'].replace(':', '_').replace('-', '_'), False)
                 assert theclass
-                self.event_templates.append(theclass(self.input_style, self.output_style, event['tokens'], event['event type'], event))
-        self.data = [x.generate_pair(x.trigger_text) for x in self.event_templates]
+                self.event_templates.append(theclass(self.input_style, self.output_style, event['tokens'], event['event type'], event, self.mapping))
+        self.data = [x.generate_pair(x.trigger_text, keyword_tokenizer, keyword_model) for x in self.event_templates]
         self.data = [x for x in self.data if x]
 
     def get_training_data(self):
@@ -119,12 +124,13 @@ class eve_template_generator():
         return event_structures
 
 class event_template():
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
         self.input_style = input_style
         self.output_style = output_style
         self.output_template = self.get_output_template()
         self.passage = ' '.join(passage)
         self.tokens = passage
+        self.mapping = mapping
         self.event_type = event_type
         if gold_event is not None:
             self.gold_event = gold_event
@@ -141,19 +147,46 @@ class event_template():
         else:
             self.gold_event = None
         
-    @classmethod
-    def get_keywords(self):
-        pass
+    # @classmethod
+    def get_keywords(self, keyword_tokenizer, keyword_model):
+        prompt = "Extract keywords for " + self.event_type + " event . "
+        tokens = prompt.split() + self.tokens
+        pieces = [keyword_tokenizer.tokenize(t) for t in tokens]
+        token_lens = [len(p) for p in pieces]
+        pieces = [p for ps in pieces for p in ps]
+        token_start_idxs = [sum(token_lens[:_]) for _ in range(len(token_lens))] + [sum(token_lens)]
+        offsets = torch.LongTensor([(token_start_idxs[i], token_start_idxs[i+1]) 
+                                    for i in range(len(token_start_idxs) - 1)]).unsqueeze(0)
+        mask = torch.BoolTensor([1] * len(tokens)).unsqueeze(0)
+        inputs = keyword_tokenizer(" ".join(tokens), return_tensors='pt')
 
-    def generate_pair(self, query_trigger):
+        keyword_input = NERBatch(
+            input_ids=inputs.input_ids,
+            token_type_ids=inputs.token_type_ids,
+            attention_mask=inputs.attention_mask,
+            mask=mask,
+            offsets=offsets,
+        )
+
+        # 一个句子一个句子地预测, 所以可以确定 predicion 第一维的长度为 1
+        prediction = keyword_model.predict(keyword_input)
+        pred_keyword_label_texts = [self.mapping['id_to_keyword'][label] for label in prediction[0] if label != -1]
+        pred_keywords_indices = convert_tag_sequence_to_span(pred_keyword_label_texts)
+        pred_keywords = []
+        for start, end in pred_keywords_indices:
+            pred_keywords.append(' '.join(tokens[start:end]))
+
+        return pred_keywords
+
+    def generate_pair(self, query_trigger, keyword_tokenizer, keyword_model):
         """
         Generate model input sentence and output sentence pair
         """
-        input_str = self.generate_input_str(query_trigger)
+        input_str = self.generate_input_str(query_trigger, keyword_tokenizer, keyword_model)
         output_str, gold_sample = self.generate_output_str(query_trigger)
         return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens)
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         return None
 
     def generate_output_str(self, query_trigger):
@@ -269,12 +302,12 @@ class event_template():
 
 class Life_Be_Born(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['born', 'birth', 'bore']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['born', 'birth', 'bore']
 
     def get_output_template(self):
         output_template = ''
@@ -286,7 +319,7 @@ class Life_Be_Born(event_template):
                     output_template += ' \n {}'.format('somebody was born in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -295,7 +328,7 @@ class Life_Be_Born(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to life and someone is given birth to.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -369,12 +402,12 @@ class Life_Be_Born(event_template):
 
 class Life_Marry(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['marry', 'marriage', 'married']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['marry', 'marriage', 'married']
     
     def get_output_template(self):
         output_template = ''
@@ -386,7 +419,7 @@ class Life_Marry(event_template):
                     output_template += ' \n {}'.format('somebody got married in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -395,7 +428,7 @@ class Life_Marry(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to life and someone is married.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -466,12 +499,12 @@ class Life_Marry(event_template):
 
 class Life_Divorce(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['divorce', 'divorced', 'Divorce']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['divorce', 'divorced', 'Divorce']
 
     def get_output_template(self):
         output_template = ''
@@ -483,7 +516,7 @@ class Life_Divorce(event_template):
                     output_template += ' \n {}'.format('somebody divorced in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -492,7 +525,7 @@ class Life_Divorce(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to life and someone was divorced.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -566,12 +599,12 @@ class Life_Divorce(event_template):
 
 class Life_Injure(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['injure', 'wounded', 'hurt']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['injure', 'wounded', 'hurt']
 
     def get_output_template(self):
         output_template = ''
@@ -583,7 +616,7 @@ class Life_Injure(event_template):
                     output_template += ' \n {}'.format('somebody or some organization led to some victim injured by some way in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -592,7 +625,7 @@ class Life_Injure(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to life and someone is injured.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -678,12 +711,12 @@ class Life_Injure(event_template):
 
 class Life_Die(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['kill', 'death', 'assassination']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['kill', 'death', 'assassination']
     
     def get_output_template(self):
         output_template = ''
@@ -695,7 +728,7 @@ class Life_Die(event_template):
                     output_template += ' \n {}'.format('somebody or some organization led to some victim died by some way in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -704,7 +737,7 @@ class Life_Die(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to life and someone died.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -789,12 +822,12 @@ class Life_Die(event_template):
 
 class Movement_Transport(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['travel', 'go', 'move']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['travel', 'go', 'move']
     
     def get_output_template(self):
         output_template = ''
@@ -806,7 +839,7 @@ class Movement_Transport(event_template):
                     output_template += ' \n {}'.format('something was sent to somewhere from some place by some vehicle. somebody or some organization was responsible for the transport.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -815,7 +848,7 @@ class Movement_Transport(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to movement. The event occurs when a weapon or vehicle is moved from one place to another.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -912,12 +945,12 @@ class Movement_Transport(event_template):
 
 class Transaction_Transfer_Ownership(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['sell', 'buy', 'acquire']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['sell', 'buy', 'acquire']
 
     def get_output_template(self):
         output_template = ''
@@ -929,7 +962,7 @@ class Transaction_Transfer_Ownership(event_template):
                     output_template += ' \n {}'.format('someone got something from some seller in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -938,7 +971,7 @@ class Transaction_Transfer_Ownership(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to transaction. The event occurs when an item or an organization is sold or gave to some other.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1036,12 +1069,12 @@ class Transaction_Transfer_Ownership(event_template):
 
 class Transaction_Transfer_Money(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['pay', 'donation', 'loan']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['pay', 'donation', 'loan']
 
     def get_output_template(self):
         output_template = ''
@@ -1053,7 +1086,7 @@ class Transaction_Transfer_Money(event_template):
                     output_template += ' \n {}'.format('someone paid some other in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1062,7 +1095,7 @@ class Transaction_Transfer_Money(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to transaction. The event occurs when someone is giving, receiving, borrowing, or lending money.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1152,12 +1185,12 @@ class Transaction_Transfer_Money(event_template):
 
 class Business_Start_Org(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['founded', 'create', 'launch']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['founded', 'create', 'launch']
 
     def get_output_template(self):
         output_template = ''
@@ -1169,7 +1202,7 @@ class Business_Start_Org(event_template):
                     output_template += ' \n {}'.format('somebody or some organization launched some organization in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1178,7 +1211,7 @@ class Business_Start_Org(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a new organization being created.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1261,12 +1294,12 @@ class Business_Start_Org(event_template):
 
 class Business_Merge_Org(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['merge', 'merging', 'merger']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['merge', 'merging', 'merger']
 
     def get_output_template(self):
         output_template = ''
@@ -1278,7 +1311,7 @@ class Business_Merge_Org(event_template):
                     output_template += ' \n {}'.format('some organization was merged.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1287,7 +1320,7 @@ class Business_Merge_Org(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to two or more organization coming together to form a new organization.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1355,12 +1388,12 @@ class Business_Merge_Org(event_template):
 
 class Business_Declare_Bankruptcy(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['bankruptcy', 'bankrupt', 'Bankruptcy']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['bankruptcy', 'bankrupt', 'Bankruptcy']
 
     def get_output_template(self):
         output_template = ''
@@ -1372,7 +1405,7 @@ class Business_Declare_Bankruptcy(event_template):
                     output_template += ' \n {}'.format('some organization declared bankruptcy.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1381,7 +1414,7 @@ class Business_Declare_Bankruptcy(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to some organization declaring bankruptcy.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1449,12 +1482,12 @@ class Business_Declare_Bankruptcy(event_template):
 
 class Business_End_Org(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['dissolve', 'disbanded', 'close'] 
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['dissolve', 'disbanded', 'close'] 
 
     def get_output_template(self):
         output_template = ''
@@ -1466,7 +1499,7 @@ class Business_End_Org(event_template):
                     output_template += ' \n {}'.format('some organization dissolved.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1475,7 +1508,7 @@ class Business_End_Org(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to some organization ceasing to exist.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1543,12 +1576,12 @@ class Business_End_Org(event_template):
 
 class Conflict_Attack(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['war', 'attack', 'terrorism']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['war', 'attack', 'terrorism']
 
     def get_output_template(self):
         output_template = ''
@@ -1560,7 +1593,7 @@ class Conflict_Attack(event_template):
                     output_template += ' \n {}'.format('some attacker attacked some facility, someone, or some organization by some way in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1569,7 +1602,7 @@ class Conflict_Attack(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to conflict and some violent physical act.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1666,12 +1699,12 @@ class Conflict_Attack(event_template):
         return output
 
 class Conflict_Demonstrate(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['rally', 'protest', 'demonstrate']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['rally', 'protest', 'demonstrate']
 
     def get_output_template(self):
         output_template = ''
@@ -1683,7 +1716,7 @@ class Conflict_Demonstrate(event_template):
                     output_template += ' \n {}'.format('some people or some organization protest at somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1692,7 +1725,7 @@ class Conflict_Demonstrate(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a large number of people coming together to protest.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1766,12 +1799,12 @@ class Conflict_Demonstrate(event_template):
         return output
 
 class Contact_Meet(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['meeting', 'met', 'summit']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['meeting', 'met', 'summit']
 
     def get_output_template(self):
         output_template = ''
@@ -1783,7 +1816,7 @@ class Contact_Meet(event_template):
                     output_template += ' \n {}'.format('some people or some organization met at somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1792,7 +1825,7 @@ class Contact_Meet(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a group of people meeting and interacting with one another face-to-face.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1867,12 +1900,12 @@ class Contact_Meet(event_template):
         return output
     
 class Contact_Phone_Write(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['call', 'communicate', 'e-mail']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['call', 'communicate', 'e-mail']
 
     def get_output_template(self):
         output_template = ''
@@ -1884,7 +1917,7 @@ class Contact_Phone_Write(event_template):
                     output_template += ' \n {}'.format('some people or some organization called or texted messages at somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1893,7 +1926,7 @@ class Contact_Phone_Write(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to people phone calling or messaging one another.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -1969,12 +2002,12 @@ class Contact_Phone_Write(event_template):
             
 class Personnel_Start_Position(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['hire', 'appoint', 'join']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['hire', 'appoint', 'join']
 
     def get_output_template(self):
         output_template = ''
@@ -1986,7 +2019,7 @@ class Personnel_Start_Position(event_template):
                     output_template += ' \n {}'.format('somebody got new job and was hired by some people or some organization in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -1995,7 +2028,7 @@ class Personnel_Start_Position(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a person begins working for an organization or a hiring manager.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2077,12 +2110,12 @@ class Personnel_Start_Position(event_template):
 
 class Personnel_End_Position(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['former', 'laid off', 'fired']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['former', 'laid off', 'fired']
 
     def get_output_template(self):
         output_template = ''
@@ -2094,7 +2127,7 @@ class Personnel_End_Position(event_template):
                     output_template += ' \n {}'.format('somebody stopped working for some people or some organization at somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2103,7 +2136,7 @@ class Personnel_End_Position(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a person stops working for an organization or a hiring manager.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2185,12 +2218,12 @@ class Personnel_End_Position(event_template):
 
 class Personnel_Nominate(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['named', 'nomination', 'nominate']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['named', 'nomination', 'nominate']
 
     def get_output_template(self):
         output_template = ''
@@ -2202,7 +2235,7 @@ class Personnel_Nominate(event_template):
                     output_template += ' \n {}'.format('somebody was nominated by somebody or some organization to do a job.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2211,7 +2244,7 @@ class Personnel_Nominate(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a person being nominated for a position.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2285,12 +2318,12 @@ class Personnel_Nominate(event_template):
 
 class Personnel_Elect(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['election', 'elect', 'elected']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['election', 'elect', 'elected']
 
     def get_output_template(self):
         output_template = ''
@@ -2302,7 +2335,7 @@ class Personnel_Elect(event_template):
                     output_template += ' \n {}'.format('somebody was elected a position, and the election was voted by some people or some organization in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2311,7 +2344,7 @@ class Personnel_Elect(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a candidate wins an election.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2393,12 +2426,12 @@ class Personnel_Elect(event_template):
 
 class Justice_Arrest_Jail(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['arrest', 'jail', 'detained']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['arrest', 'jail', 'detained']
     
     def get_output_template(self):
         output_template = ''
@@ -2410,7 +2443,7 @@ class Justice_Arrest_Jail(event_template):
                     output_template += ' \n {}'.format('somebody was sent to jailed or arrested by somebody or some organization in somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2419,7 +2452,7 @@ class Justice_Arrest_Jail(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to a person getting arrested or a person being sent to jail.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2501,12 +2534,12 @@ class Justice_Arrest_Jail(event_template):
 
 class Justice_Release_Parole(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['parole', 'release', 'free']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['parole', 'release', 'free']
 
     def get_output_template(self):
         output_template = ''
@@ -2518,7 +2551,7 @@ class Justice_Release_Parole(event_template):
                     output_template += ' \n {}'.format('somebody was released by some people or some organization from somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2527,7 +2560,7 @@ class Justice_Release_Parole(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to an end to someone's custody in prison.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2609,12 +2642,12 @@ class Justice_Release_Parole(event_template):
 
 class Justice_Trial_Hearing(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['trial', 'hearing', 'proceeding']    
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['trial', 'hearing', 'proceeding']    
     
     def get_output_template(self):
         output_template = ''
@@ -2626,7 +2659,7 @@ class Justice_Trial_Hearing(event_template):
                     output_template += ' \n {}'.format('somebody, prosecuted by some other, faced a trial in somewhere. The hearing was judged by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2635,7 +2668,7 @@ class Justice_Trial_Hearing(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to a trial or hearing for someone.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2724,12 +2757,12 @@ class Justice_Trial_Hearing(event_template):
 
 class Justice_Charge_Indict(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['indict', 'charged', 'accused']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['indict', 'charged', 'accused']
 
     def get_output_template(self):
         output_template = ''
@@ -2741,7 +2774,7 @@ class Justice_Charge_Indict(event_template):
                     output_template += ' \n {}'.format('somebody was charged by some other in somewhere. The adjudication was judged by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2750,7 +2783,7 @@ class Justice_Charge_Indict(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone or some organization being accused of a crime.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2839,12 +2872,12 @@ class Justice_Charge_Indict(event_template):
 
 class Justice_Sue(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['sue', 'lawsuit', 'suit']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['sue', 'lawsuit', 'suit']
 
     def get_output_template(self):
         output_template = ''
@@ -2856,7 +2889,7 @@ class Justice_Sue(event_template):
                     output_template += ' \n {}'.format('somebody was sued by some other in somewhere. The adjudication was judged by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2865,7 +2898,7 @@ class Justice_Sue(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to a court proceeding that has been initiated and someone sue the other.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -2954,12 +2987,12 @@ class Justice_Sue(event_template):
 
 class Justice_Convict(event_template):
 
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['convicted', 'guilty', 'verdict']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['convicted', 'guilty', 'verdict']
 
     def get_output_template(self):
         output_template = ''
@@ -2971,7 +3004,7 @@ class Justice_Convict(event_template):
                     output_template += ' \n {}'.format('somebody was convicted of a crime in somewhere. The adjudication was judged by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -2980,7 +3013,7 @@ class Justice_Convict(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being found guilty of a crime.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3060,12 +3093,12 @@ class Justice_Convict(event_template):
         return output
 
 class Justice_Sentence(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['sentenced', 'sentencing', 'sentence']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['sentenced', 'sentencing', 'sentence']
 
     def get_output_template(self):
         output_template = ''
@@ -3077,7 +3110,7 @@ class Justice_Sentence(event_template):
                     output_template += ' \n {}'.format('somebody was sentenced to punishment in somewhere. The adjudication was judged by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3086,7 +3119,7 @@ class Justice_Sentence(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being sentenced to punishment because of a crime.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3166,12 +3199,12 @@ class Justice_Sentence(event_template):
         return output
 
 class Justice_Fine(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['fine', 'fined', 'payouts']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['fine', 'fined', 'payouts']
 
     def get_output_template(self):
         output_template = ''
@@ -3183,7 +3216,7 @@ class Justice_Fine(event_template):
                     output_template += ' \n {}'.format('some people or some organization in somewhere was ordered by some adjudicator to pay a fine.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3192,7 +3225,7 @@ class Justice_Fine(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being issued a financial punishment.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3272,12 +3305,12 @@ class Justice_Fine(event_template):
         return output
 
 class Justice_Execute(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['execution', 'executed', 'execute']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['execution', 'executed', 'execute']
 
     def get_output_template(self):
         output_template = ''
@@ -3289,7 +3322,7 @@ class Justice_Execute(event_template):
                     output_template += ' \n {}'.format('somebody was executed by somebody or some organization at somewhere.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3298,7 +3331,7 @@ class Justice_Execute(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being executed to death.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3378,12 +3411,12 @@ class Justice_Execute(event_template):
         return output
             
 class Justice_Extradite(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['extradition', 'extradited', 'extraditing']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['extradition', 'extradited', 'extraditing']
 
     def get_output_template(self):
         output_template = ''
@@ -3395,7 +3428,7 @@ class Justice_Extradite(event_template):
                     output_template += ' \n {}'.format('somebody was extradicted to somewhere from some place. somebody or some organization was responsible for the extradition.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3404,7 +3437,7 @@ class Justice_Extradite(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format('The event is related to justice. The event occurs when a person was extradited from one place to another place.')
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3496,12 +3529,12 @@ class Justice_Extradite(event_template):
         return output
 
 class Justice_Acquit(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['acquitted', 'acquittal', 'acquit']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['acquitted', 'acquittal', 'acquit']
 
     def get_output_template(self):
         output_template = ''
@@ -3513,7 +3546,7 @@ class Justice_Acquit(event_template):
                     output_template += ' \n {}'.format('somebody was acquitted of the charges by some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3522,7 +3555,7 @@ class Justice_Acquit(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being acquitted.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3594,12 +3627,12 @@ class Justice_Acquit(event_template):
         return output
 
 class Justice_Pardon(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
 
-    @classmethod
-    def get_keywords(self):
-        return ['pardon', 'pardoned', 'remission']
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['pardon', 'pardoned', 'remission']
 
     def get_output_template(self):
         output_template = ''
@@ -3611,7 +3644,7 @@ class Justice_Pardon(event_template):
                     output_template += ' \n {}'.format('somebody received a pardon from some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3620,7 +3653,7 @@ class Justice_Pardon(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone being pardoned.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
@@ -3692,12 +3725,12 @@ class Justice_Pardon(event_template):
         return output
 
 class Justice_Appeal(event_template):
-    def __init__(self, input_style, output_style, passage, event_type, gold_event=None):
-        super().__init__(input_style, output_style, passage, event_type, gold_event)
+    def __init__(self, input_style, output_style, passage, event_type, gold_event=None, mapping=None):
+        super().__init__(input_style, output_style, passage, event_type, gold_event, mapping)
     
-    @classmethod
-    def get_keywords(self):
-        return ['appeal', 'appealing', 'appeals']  
+    # @classmethod
+    # def get_keywords(self):
+    #     return ['appeal', 'appealing', 'appeals']  
 
     def get_output_template(self):
         output_template = ''
@@ -3709,7 +3742,7 @@ class Justice_Appeal(event_template):
                     output_template += ' \n {}'.format('some other in somewhere appealed the adjudication from some adjudicator.')
         return ('\n'.join(output_template.split('\n')[1:])).strip()
 
-    def generate_input_str(self, query_trigger):
+    def generate_input_str(self, query_trigger, keyword_tokenizer, keyword_model):
         input_str = self.passage
         for i_style in INPUT_STYLE_SET:
             if i_style in self.input_style:
@@ -3718,7 +3751,7 @@ class Justice_Appeal(event_template):
                 if i_style == 'event_type_sent':
                     input_str += ' \n {}'.format("The event is related to someone appealing the decision of a court.")
                 if i_style == 'keywords':
-                    input_str += ' \n Similar triggers such as {}'.format(', '.join(self.get_keywords()))
+                    input_str += ' \n Event keywords such as {}'.format(', '.join(self.get_keywords(keyword_tokenizer, keyword_model)))
                 if i_style == 'triggers':
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':

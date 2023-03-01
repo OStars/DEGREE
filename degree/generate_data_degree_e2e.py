@@ -1,9 +1,12 @@
+import torch
 import os, json, pickle, logging, pprint, random
 import numpy as np
-from degree.dataset import EEDataset
+from tqdm import tqdm
+from dataset import EEDataset
 from argparse import ArgumentParser, Namespace
 from utils import generate_vocabs
 from transformers import AutoTokenizer
+from model import NERModel
 import ipdb
 
 # configuration
@@ -29,13 +32,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(messa
 logger = logging.getLogger(__name__)
 logger.info(f"\n{pprint.pformat(vars(config), indent=4)}")
 
-def generate_data(data_set, vocab, config):
+def generate_data(data_set, vocab, config, mapping=None, keyword_tokenizer=None, keyword_model=None):
     inputs = []
     targets = []
     events = []
     
-    for data in data_set.data:
-        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
+    for data in tqdm(data_set.data):
+        event_template = eve_template_generator(data.tokens, data.triggers, data.roles,config.input_style, 
+                                                config.output_style, vocab, mapping, keyword_tokenizer, keyword_model, True)
         all_data_ = event_template.get_training_data()
         pos_data_ = [dt for dt in all_data_ if dt[3]]
         neg_data_ = [dt for dt in all_data_ if not dt[3]]
@@ -62,6 +66,20 @@ tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.ca
 special_tokens = ['<Trigger>', '<sep>']
 tokenizer.add_tokens(special_tokens)
 
+with open(os.path.join(os.path.dirname(config.train_file), "etypes.json"), 'r') as f:
+    mapping = {"id_to_keyword": {}, "keyword_to_id": {}}
+    infos = json.load(f)
+    for i, label in enumerate(infos['Keyword_type']):
+        mapping["id_to_keyword"][i] = label
+        mapping["keyword_to_id"][label] = i
+
+# Model for keyword extraction
+ner_tokenizer = AutoTokenizer.from_pretrained(config.keyword_model_name, cache_dir=config.cache_dir)
+model = NERModel(config, len(mapping['keyword_to_id']), ner_tokenizer)
+model.load_state_dict(torch.load(config.keyword_model))
+model.cuda(config.gpu_device)
+model.eval()
+
 if not os.path.exists(config.finetune_dir):
     os.makedirs(config.finetune_dir)
 
@@ -70,13 +88,16 @@ train_set = EEDataset(tokenizer, config.train_file, max_length=config.max_length
 dev_set = EEDataset(tokenizer, config.dev_file, max_length=config.max_length)
 test_set = EEDataset(tokenizer, config.test_file, max_length=config.max_length)
 vocab = generate_vocabs([train_set, dev_set, test_set])
+vocab["id_to_keyword"] = mapping["id_to_keyword"]
+vocab["keyword_to_id"] = mapping["keyword_to_id"]
 
 # save vocabulary
 with open('{}/vocab.json'.format(config.finetune_dir), 'w') as f:
     json.dump(vocab, f, indent=4)    
 
 # generate finetune data
-train_inputs, train_targets, train_events = generate_data(train_set, vocab, config)
+# train_inputs, train_targets, train_events = generate_data(train_set, vocab, config)
+train_inputs, train_targets, train_events = generate_data(train_set, vocab, config, mapping, ner_tokenizer, model)
 logger.info(f"Generated {len(train_inputs)} training examples from {len(train_set)} instance")
 
 with open('{}/train_input.json'.format(config.finetune_dir), 'w') as f:
@@ -92,7 +113,8 @@ with open('{}/train_all.pkl'.format(config.finetune_dir), 'wb') as f:
         'all': train_events
     }, f)
     
-dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config)
+# dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config)
+dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config, mapping, ner_tokenizer, model)
 logger.info(f"Generated {len(dev_inputs)} dev examples from {len(dev_set)} instance")
 
 with open('{}/dev_input.json'.format(config.finetune_dir), 'w') as f:
@@ -108,7 +130,8 @@ with open('{}/dev_all.pkl'.format(config.finetune_dir), 'wb') as f:
         'all': dev_events
     }, f)
     
-test_inputs, test_targets, test_events = generate_data(test_set, vocab, config)
+# test_inputs, test_targets, test_events = generate_data(test_set, vocab, config)
+test_inputs, test_targets, test_events = generate_data(test_set, vocab, config, mapping, ner_tokenizer, model)
 logger.info(f"Generated {len(test_inputs)} test examples from {len(test_set)} instance")
 
 with open('{}/test_input.json'.format(config.finetune_dir), 'w') as f:

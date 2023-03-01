@@ -43,6 +43,25 @@ class ConfigurationError(Exception):
     def __str__(self):
         return self.message
 
+def generate_vocabs(datasets):
+    event_type_set = set()
+    role_type_set = set()
+    for dataset in datasets:
+        event_type_set.update(dataset.event_type_set)
+        role_type_set.update(dataset.role_type_set)
+    
+    event_type_itos = sorted(event_type_set)
+    role_type_itos = sorted(role_type_set)
+    
+    event_type_stoi = {k: i for i, k in enumerate(event_type_itos)}
+    role_type_stoi = {k: i for i, k in enumerate(role_type_itos)}
+    
+    return {
+        'event_type_itos': event_type_itos,
+        'event_type_stoi': event_type_stoi,
+        'role_type_itos': role_type_itos,
+        'role_type_stoi': role_type_stoi,
+    }
 
 def safe_div(num, denom):
     if denom > 0:

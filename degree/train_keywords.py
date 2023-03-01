@@ -46,7 +46,7 @@ best_model_path = os.path.join(output_dir, 'best_model.mdl')
 dev_prediction_path = os.path.join(output_dir, 'pred.dev.json')
 test_prediction_path = os.path.join(output_dir, 'pred.test.json')
 
-with open(os.path.join(config.data_dir, "etypes.json"), 'r') as f:
+with open(os.path.join(os.path.dirname(config.train_file), "etypes.json"), 'r') as f:
     mapping = {
         "id_to_keyword": {}, 
         "keyword_to_id": {},
@@ -229,7 +229,7 @@ for epoch in range(1, config.max_epoch+1):
                 })
         progress.close()
 
-        precision, recall, f1 = compute_f1(dev_pred_key_num, dev_gold_key_num, dev_match_key_num)
+        precision, recall, f1 = compute_f1(test_pred_key_num, test_gold_key_num, test_match_key_num)
         test_scores = {'precision': precision, 'recall': recall, 'f1': f1}
         # print scores
         logger.info("---------------------------------------------------------------------")
