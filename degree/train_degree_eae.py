@@ -164,14 +164,14 @@ for epoch in range(1, config.max_epoch+1):
     }
 
     # print scores
-    print("---------------------------------------------------------------------")
-    print('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+    logger.info("---------------------------------------------------------------------")
+    logger.info('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
         dev_scores['arg_id'][0] * 100.0, dev_match_arg_id, dev_pred_arg_num, 
         dev_scores['arg_id'][1] * 100.0, dev_match_arg_id, dev_gold_arg_num, dev_scores['arg_id'][2] * 100.0))
-    print('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+    logger.info('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
         dev_scores['arg_cls'][0] * 100.0, dev_match_arg_cls, dev_pred_arg_num, 
         dev_scores['arg_cls'][1] * 100.0, dev_match_arg_cls, dev_gold_arg_num, dev_scores['arg_cls'][2] * 100.0))
-    print("---------------------------------------------------------------------")
+    logger.info("---------------------------------------------------------------------")
     
     # check best dev model
     if dev_scores['arg_cls'][2] > best_dev_scores['arg_cls'][2]:
@@ -232,14 +232,14 @@ for epoch in range(1, config.max_epoch+1):
         }
         
         # print scores
-        print("---------------------------------------------------------------------")
-        print('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+        logger.info("---------------------------------------------------------------------")
+        logger.info('Role I     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
             test_scores['arg_id'][0] * 100.0, test_match_arg_id, test_pred_arg_num, 
             test_scores['arg_id'][1] * 100.0, test_match_arg_id, test_gold_arg_num, test_scores['arg_id'][2] * 100.0))
-        print('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+        logger.info('Role C     - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
             test_scores['arg_cls'][0] * 100.0, test_match_arg_cls, test_pred_arg_num, 
             test_scores['arg_cls'][1] * 100.0, test_match_arg_cls, test_gold_arg_num, test_scores['arg_cls'][2] * 100.0))
-        print("---------------------------------------------------------------------")
+        logger.info("---------------------------------------------------------------------")
         
         # save test result
         with open(test_prediction_path, 'w') as fp:

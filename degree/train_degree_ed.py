@@ -162,11 +162,11 @@ for epoch in range(1, config.max_epoch+1):
     }
 
     # print scores
-    print("---------------------------------------------------------------------")
-    print('Trigger I  - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+    logger.info("---------------------------------------------------------------------")
+    logger.info('Trigger I  - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
         dev_scores['tri_id'][0] * 100.0, dev_match_tri_num, dev_pred_tri_num, 
         dev_scores['tri_id'][1] * 100.0, dev_match_tri_num, dev_gold_tri_num, dev_scores['tri_id'][2] * 100.0))
-    print("---------------------------------------------------------------------")
+    logger.info("---------------------------------------------------------------------")
     
     # check best dev model
     if dev_scores['tri_id'][2] > best_dev_scores['tri_id'][2]:
@@ -226,11 +226,11 @@ for epoch in range(1, config.max_epoch+1):
         }
 
         # print scores
-        print("---------------------------------------------------------------------")
-        print('Trigger I  - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
+        logger.info("---------------------------------------------------------------------")
+        logger.info('Trigger I  - P: {:5.2f} ({:4d}/{:4d}), R: {:5.2f} ({:4d}/{:4d}), F: {:5.2f}'.format(
             test_scores['tri_id'][0] * 100.0, test_match_tri_num, test_pred_tri_num, 
             test_scores['tri_id'][1] * 100.0, test_match_tri_num, test_gold_tri_num, test_scores['tri_id'][2] * 100.0))
-        print("---------------------------------------------------------------------")
+        logger.info("---------------------------------------------------------------------")
         
         # save test result
         with open(test_prediction_path, 'w') as fp:
