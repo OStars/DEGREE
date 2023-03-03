@@ -129,6 +129,8 @@ class EEDataset(Dataset):
             assert sum(token_lens) == len(piece_idxs)
                         
             triggers = [(e['trigger']['start'], e['trigger']['end'], e['event_type']) for e in events]
+            no_duplicated_triggers = set(triggers)
+            assert len(triggers) == len(no_duplicated_triggers)
             roles = get_role_list(entities, events, entity_id_map)
             
             token_start_idxs = [sum(token_lens[:_]) for _ in range(len(token_lens))] + [sum(token_lens)]

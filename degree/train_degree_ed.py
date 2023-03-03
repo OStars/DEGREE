@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AdamW, get_linear_schedule_with_warmup
 from model import GenerativeModel
-from degree.dataset import GenDataset
+from dataset import GenDataset
 from utils import Summarizer, compute_f1
 from argparse import ArgumentParser, Namespace
 import ipdb

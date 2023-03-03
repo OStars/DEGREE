@@ -1,6 +1,6 @@
 import os, json, pickle, logging, pprint, random
 import numpy as np
-from degree.dataset import EEDataset
+from dataset import EEDataset
 from argparse import ArgumentParser, Namespace
 from utils import generate_vocabs
 from transformers import AutoTokenizer
