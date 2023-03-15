@@ -181,6 +181,7 @@ class GenDataset(Dataset):
         self.no_bos = no_bos # if you use bart, then this should be False; if you use t5, then this should be True
         self.data = []
         self.load_data(unseen_types)
+        # self.data = self.data[:100] # FOR DEBUG
 
     def __len__(self):
         return len(self.data)
