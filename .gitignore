@@ -6,3 +6,4 @@ data/*
 predictions/*
 .vscode
 __pycache__
+pretrained_models

@@ -2,7 +2,7 @@ import os, sys, json, logging, pprint, tqdm
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from model import GenerativeModel
 from dataset import GenDataset, EEDataset
 from utils import compute_f1
@@ -14,6 +14,7 @@ parser = ArgumentParser()
 parser.add_argument('-c', '--e2e_config', required=True)
 parser.add_argument('-e', '--e2e_model', required=True)
 parser.add_argument('--no_dev', action='store_true', default=False)
+parser.add_argument('--ic', action='store_true', default=False)
 parser.add_argument('--eval_batch_size', type=int)
 parser.add_argument('--write_file', type=str)
 args = parser.parse_args()
@@ -34,8 +35,12 @@ torch.manual_seed(config.seed)
 torch.backends.cudnn.enabled = False
 
 # logger
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(message)s', datefmt='[%Y-%m-%d %H:%M:%S]')
+log_path = os.path.join(os.path.dirname(args.e2e_model), "eval.log")
+logging.basicConfig(format='%(asctime)s - %(name)s - %(message)s', datefmt='[%Y-%m-%d %H:%M:%S]', force=True,
+                    handlers=[logging.FileHandler(log_path), logging.StreamHandler()])
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.info(f"\n{pprint.pformat(vars(config), indent=4)}")
 
 def get_span_idx(pieces, token_start_idxs, span, tokenizer, trigger_span=None):
     """
@@ -115,7 +120,7 @@ def get_span_idx_tri(pieces, token_start_idxs, span, tokenizer, trigger_span=Non
         else:
             return sorted(candidates, key=lambda x: np.abs(trigger_span[0]-x[0]))
 
-def cal_scores(gold_triggers, pred_triggers, gold_roles, pred_roles):
+def cal_scores(gold_triggers, pred_triggers, gold_roles, pred_roles, all_gold_triggers=None, all_gold_roles=None):
     assert len(gold_triggers) == len(pred_triggers)
     assert len(gold_roles) == len(pred_roles)    
     # tri_id
@@ -155,6 +160,20 @@ def cal_scores(gold_triggers, pred_triggers, gold_roles, pred_roles):
         gold_arg_cls_num += len(gold_set)
         pred_arg_cls_num += len(pred_set)
         match_arg_cls_num += len(gold_set & pred_set)
+
+    if all_gold_triggers is not None and all_gold_roles is not None:
+        gold_tri_id_num, gold_tri_cls_num, gold_arg_id_num, gold_arg_cls_num = 0, 0, 0, 0
+        for gold_trigger in all_gold_triggers:
+            gold_set = set([(t[0], t[1]) for t in gold_trigger])
+            gold_tri_id_num += len(gold_set)
+            gold_set = set(gold_trigger)
+            gold_tri_cls_num += len(gold_set)
+
+        for gold_role in all_gold_roles:
+            gold_set = set([(r[0][2],)+r[1][:-1] for r in gold_role])
+            gold_arg_id_num += len(gold_set)
+            gold_set = set([(r[0][2],)+r[1] for r in gold_role])
+            gold_arg_cls_num += len(gold_set)
     
     scores = {
         'tri_id': (gold_tri_id_num, pred_tri_id_num, match_tri_id_num) + compute_f1(pred_tri_id_num, gold_tri_id_num, match_tri_id_num),
@@ -174,15 +193,24 @@ assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in c
               
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.cache_dir)
-special_tokens = ['<Trigger>', '<sep>']
+# special_tokens = ['<Trigger>', '<sep>']
+special_tokens = ['<Trigger>', '<sep>', '<and>', '<Keyword>', '</Keyword>']
 tokenizer.add_tokens(special_tokens)
 
 if args.eval_batch_size:
     config.eval_batch_size=args.eval_batch_size
 
+ic_tokenizer = None
+ic_model = None
+if args.ic:
+    ic_tokenizer = AutoTokenizer.from_pretrained(config.context_model_name, cache_dir=config.cache_dir)
+    ic_model = AutoModelForSequenceClassification.from_pretrained(config.context_model)
+    ic_model.cuda(device=config.gpu_device)
+    ic_model.eval()
+
 # load data
-dev_set = EEDataset(tokenizer, config.dev_file, max_length=config.max_length)
-test_set = EEDataset(tokenizer, config.test_file, max_length=config.max_length)
+dev_set = EEDataset(tokenizer, config.dev_file, max_length=config.max_length, ic_tokenizer=ic_tokenizer, ic_model=ic_model)
+test_set = EEDataset(tokenizer, config.test_file, max_length=config.max_length, ic_tokenizer=ic_tokenizer, ic_model=ic_model)
 dev_batch_num = len(dev_set) // config.eval_batch_size + (len(dev_set) % config.eval_batch_size != 0)
 test_batch_num = len(test_set) // config.eval_batch_size + (len(test_set) % config.eval_batch_size != 0)
 with open(config.vocab_file) as f:
@@ -270,24 +298,26 @@ if not args.no_dev:
                 
     progress.close()
     
+    dev_all_gold_triggers = dev_set.gold_triggers
+    dev_all_gold_roles = dev_set.gold_roles
     # calculate scores
-    dev_scores = cal_scores(dev_gold_triggers, dev_pred_triggers, dev_gold_roles, dev_pred_roles)
+    dev_scores = cal_scores(dev_gold_triggers, dev_pred_triggers, dev_gold_roles, dev_pred_roles, dev_all_gold_triggers, dev_all_gold_roles)
     
-    print("---------------------------------------------------------------------")
-    print('Trigger I  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+    logger.info("---------------------------------------------------------------------")
+    logger.info('Trigger I  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
         dev_scores['tri_id'][3] * 100.0, dev_scores['tri_id'][2], dev_scores['tri_id'][1], 
         dev_scores['tri_id'][4] * 100.0, dev_scores['tri_id'][2], dev_scores['tri_id'][0], dev_scores['tri_id'][5] * 100.0))
-    print('Trigger C  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+    logger.info('Trigger C  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
         dev_scores['tri_cls'][3] * 100.0, dev_scores['tri_cls'][2], dev_scores['tri_cls'][1], 
         dev_scores['tri_cls'][4] * 100.0, dev_scores['tri_cls'][2], dev_scores['tri_cls'][0], dev_scores['tri_cls'][5] * 100.0))
-    print("---------------------------------------------------------------------")
-    print('Role I     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+    logger.info("---------------------------------------------------------------------")
+    logger.info('Role I     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
         dev_scores['arg_id'][3] * 100.0, dev_scores['arg_id'][2], dev_scores['arg_id'][1], 
         dev_scores['arg_id'][4] * 100.0, dev_scores['arg_id'][2], dev_scores['arg_id'][0], dev_scores['arg_id'][5] * 100.0))
-    print('Role C     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+    logger.info('Role C     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
         dev_scores['arg_cls'][3] * 100.0, dev_scores['arg_cls'][2], dev_scores['arg_cls'][1], 
         dev_scores['arg_cls'][4] * 100.0, dev_scores['arg_cls'][2], dev_scores['arg_cls'][0], dev_scores['arg_cls'][5] * 100.0))
-    print("---------------------------------------------------------------------")
+    logger.info("---------------------------------------------------------------------")
     
     
 # test set
@@ -377,25 +407,28 @@ for batch in DataLoader(test_set, batch_size=config.eval_batch_size, shuffle=Fal
         })
             
 progress.close()
+
+test_all_gold_triggers = test_set.gold_triggers
+test_all_gold_roles = test_set.gold_roles
     
 # calculate scores
-test_scores = cal_scores(test_gold_triggers, test_pred_triggers, test_gold_roles, test_pred_roles)
+test_scores = cal_scores(test_gold_triggers, test_pred_triggers, test_gold_roles, test_pred_roles, test_all_gold_triggers, test_all_gold_roles)
 
-print("---------------------------------------------------------------------")
-print('Trigger I  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+logger.info("---------------------------------------------------------------------")
+logger.info('Trigger I  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
     test_scores['tri_id'][3] * 100.0, test_scores['tri_id'][2], test_scores['tri_id'][1], 
     test_scores['tri_id'][4] * 100.0, test_scores['tri_id'][2], test_scores['tri_id'][0], test_scores['tri_id'][5] * 100.0))
-print('Trigger C  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+logger.info('Trigger C  - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
     test_scores['tri_cls'][3] * 100.0, test_scores['tri_cls'][2], test_scores['tri_cls'][1], 
     test_scores['tri_cls'][4] * 100.0, test_scores['tri_cls'][2], test_scores['tri_cls'][0], test_scores['tri_cls'][5] * 100.0))
-print("---------------------------------------------------------------------")
-print('Role I     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+logger.info("---------------------------------------------------------------------")
+logger.info('Role I     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
     test_scores['arg_id'][3] * 100.0, test_scores['arg_id'][2], test_scores['arg_id'][1], 
     test_scores['arg_id'][4] * 100.0, test_scores['arg_id'][2], test_scores['arg_id'][0], test_scores['arg_id'][5] * 100.0))
-print('Role C     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
+logger.info('Role C     - P: {:6.2f} ({:4d}/{:4d}), R: {:6.2f} ({:4d}/{:4d}), F: {:6.2f}'.format(
     test_scores['arg_cls'][3] * 100.0, test_scores['arg_cls'][2], test_scores['arg_cls'][1], 
     test_scores['arg_cls'][4] * 100.0, test_scores['arg_cls'][2], test_scores['arg_cls'][0], test_scores['arg_cls'][5] * 100.0))
-print("---------------------------------------------------------------------")
+logger.info("---------------------------------------------------------------------")
 
 if args.write_file:
     with open(args.write_file, 'w') as fw:

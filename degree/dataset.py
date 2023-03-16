@@ -63,13 +63,17 @@ def get_role_list(entities, events, id_map):
     return role_list
 
 class EEDataset(Dataset):
-    def __init__(self, tokenizer, path, max_length=128, fair_compare=True):
+    def __init__(self, tokenizer, path, max_length=128, fair_compare=True, ic_tokenizer=None, ic_model=None):
         self.tokenizer = tokenizer
+        self.ic_tokenizer = ic_tokenizer
+        self.ic_model = ic_model
         self.path = path
         self.data = []
         self.insts = []
         self.max_length = max_length
         self.fair_compare = fair_compare
+        self.gold_triggers = []
+        self.gold_roles = []
         self.load_data()
 
     def __len__(self):
@@ -106,7 +110,7 @@ class EEDataset(Dataset):
                 continue
             self.insts.append(inst)
 
-        for inst in self.insts:
+        for inst in tqdm(self.insts):
             doc_id = inst['doc_id']
             wnd_id = inst['wnd_id']
             tokens = inst['tokens']
@@ -135,6 +139,16 @@ class EEDataset(Dataset):
             
             token_start_idxs = [sum(token_lens[:_]) for _ in range(len(token_lens))] + [sum(token_lens)]
             
+            label = True
+            # irrelevant classify
+            if self.ic_tokenizer is not None and self.ic_model is not None:
+                label = False
+                inputs = self.ic_tokenizer(' '.join(tokens), return_tensors='pt', max_length=self.max_length)
+                inputs.to(self.ic_model.device)
+                with torch.no_grad():
+                    output = self.ic_model(**inputs)
+                    label = bool(torch.argmax(output.logits).item())
+
             instance = EEInstance(
                 doc_id=doc_id,
                 wnd_id=wnd_id,
@@ -146,7 +160,10 @@ class EEDataset(Dataset):
                 triggers = triggers,
                 roles = roles,
             )
-            self.data.append(instance)
+            if label:
+                self.data.append(instance)
+            self.gold_triggers.append(triggers)
+            self.gold_roles.append(roles)
             
         logger.info(f'Loaded {len(self)}/{len(lines)} instances from {self.path}')
 

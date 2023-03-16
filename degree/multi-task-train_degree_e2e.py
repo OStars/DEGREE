@@ -143,7 +143,7 @@ for epoch in range(1, config.max_epoch+1):
                                             DataLoader(keyword_dev_set, batch_size=config.eval_batch_size, 
                                                  shuffle=False, collate_fn=keyword_dev_set.collate_fn))):
         progress.update(1)
-        pred_text = model.predict(batch, max_length=config.max_output_length)
+        pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
         gold_text = batch.target_text
         input_text = batch.input_text
         for i_text, g_text, p_text, info in zip(input_text, gold_text, pred_text, batch.infos):
@@ -258,7 +258,7 @@ for epoch in range(1, config.max_epoch+1):
                                               DataLoader(keyword_test_set, batch_size=config.eval_batch_size, 
                                                      shuffle=False, collate_fn=keyword_test_set.collate_fn))):
             progress.update(1)
-            pred_text = model.predict(batch, max_length=config.max_output_length)
+            pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
             gold_text = batch.target_text
             input_text = batch.input_text
             for i_text, g_text, p_text, info in zip(input_text, gold_text, pred_text, batch.infos):
@@ -316,6 +316,7 @@ for epoch in range(1, config.max_epoch+1):
         progress.close()
 
         test_scores = {
+            'keyword_id': compute_f1(test_pred_key_num, test_gold_key_num, test_match_key_num), 
             'tri_id': compute_f1(test_pred_tri_num, test_gold_tri_num, test_match_tri_num), 
             'arg_id': compute_f1(test_pred_arg_num, test_gold_arg_num, test_match_arg_id),
             'arg_cls': compute_f1(test_pred_arg_num, test_gold_arg_num, test_match_arg_cls)

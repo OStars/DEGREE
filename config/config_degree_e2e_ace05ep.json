@@ -16,6 +16,8 @@
     "output_dir": "./output/degree_e2e_ace05ep/",
     "cache_dir": "/shared_data/pretrained_models",
     "model_name": "facebook/bart-large",
+    "context_model_name": "bert-large-uncased",
+    "context_model": "pretrained_models/finetuned-bert-large-uncased/checkpoint-2259",
     "input_style": ["event_type_sent", "template"],   
     "output_style": ["trigger:sentence", "argument:sentence"], 
     "n_negative": 15, 
