@@ -63,7 +63,8 @@ def generate_data(data_set, vocab, config, is_train=False):
         return inputs, targets, infos
 
     for data in data_set.data:
-        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
+        # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
+        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, is_train=is_train)
         if event_template.events:
             event_data, keyword_data = event_template.get_training_data()
             inputs_, targets_, events_ = organize_data(event_data, config)
@@ -85,7 +86,7 @@ assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in c
 
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.cache_dir)
-special_tokens = ['<Trigger>', '<sep>', '<Keyword>', '</Keyword>']
+special_tokens = ['<Trigger>', '<sep>', '<and>',  '<Keyword>', '</Keyword>']
 tokenizer.add_tokens(special_tokens)
 
 if not os.path.exists(config.finetune_dir):
@@ -103,7 +104,7 @@ with open('{}/vocab.json'.format(config.finetune_dir), 'w') as f:
 
 # generate finetune data
 # train_inputs, train_targets, train_events = generate_data(train_set, vocab, config)
-train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config)
+train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config, is_train=True)
 logger.info(f"Generated {len(train_inputs)} training examples from {len(train_set)} instance")
 
 with open('{}/train_input.json'.format(config.finetune_dir), 'w') as f:

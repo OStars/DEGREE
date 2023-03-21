@@ -30,7 +30,7 @@ ROLE_PH_MAP = {
 }
 
 class eve_template_generator():
-    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False):
+    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False, is_train=False):
         """
         generate strctured information for events
         
@@ -63,7 +63,7 @@ class eve_template_generator():
                 theclass = getattr(sys.modules[__name__], event['event type'].replace(':', '_').replace('-', '_'), False)
                 assert theclass
                 self.event_templates.append(theclass(self.input_style, self.output_style, event['tokens'], event['event type'], event))
-        self.data = [x.generate_pair(x.trigger_text) for x in self.event_templates]
+        self.data = [x.generate_pair(x.trigger_text, is_train) for x in self.event_templates]
         self.data = [x for x in self.data if x]
         self.keyword_data = [x.generate_keyword_pair() for x in self.event_templates]
         self.keyword_data = [x for x in self.keyword_data if x]
@@ -146,10 +146,11 @@ class event_template():
         else:
             self.gold_event = None
         
-    # @classmethod
-    # def get_keywords(self):
-    #     pass
+    @classmethod
     def get_keywords(self):
+        pass
+
+    def get_keywords_text_span(self):
         keywords = []
         if self.gold_event:
             keywords.extend([x['trigger text'] for x in self.gold_event if x['event type']==self.event_type])
@@ -167,11 +168,16 @@ class event_template():
 
         return list(set(keyword_spans))
 
-    def generate_pair(self, query_trigger):
+    def generate_pair(self, query_trigger, is_train):
         """
         Generate model input sentence and output sentence pair
         """
         input_str = self.generate_input_str(query_trigger)
+        if is_train:
+            # 将 Event keywords such as ... 插入句子中 
+            keyword_desc = self.generate_keywords_output_str()[0]
+            input_str = input_str[:input_str.rfind('\n', 0, input_str.rfind('\n'))].strip() + ' \n ' + \
+                keyword_desc +  ' \n ' + input_str[input_str.find('\n', input_str.find('\n')+1)+1:].strip()
         output_str, gold_sample = self.generate_output_str(query_trigger)
         return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens)
 
@@ -196,93 +202,93 @@ class event_template():
         return None
     
     # 在原句子中插入 <keyword></keyword> 标签把关键词特别标注出来
-    def generate_keywords_output_str(self):
-        keyword_spans = self.get_keyword_spans()
-        keyword_spans = sorted(list(set(keyword_spans)), key=lambda x: x[0])
-        lefts = [span[0] for span in keyword_spans] + [len(self.tokens)]
-        rights = [span[1] for span in keyword_spans] + [len(self.tokens)]
-        output_tokens = []
-        l_index, r_index, t_index = 0, 0, 0
-        while(t_index < len(self.tokens)):
-            if r_index < len(rights) and l_index < len(lefts):
-                if rights[r_index] <= lefts[l_index] and rights[r_index] <= t_index:
-                    output_tokens.append('</Keyword>')
-                    r_index += 1
-                elif lefts[l_index] <= t_index:
-                    output_tokens.append('<Keyword>')
-                    l_index += 1
-                else:
-                    output_tokens.append(self.tokens[t_index])
-                    t_index += 1
-            else:
-                output_tokens.append(self.tokens[t_index])
-                t_index += 1
+    # def generate_keywords_output_str(self):
+    #     keyword_spans = self.get_keyword_spans()
+    #     keyword_spans = sorted(list(set(keyword_spans)), key=lambda x: x[0])
+    #     lefts = [span[0] for span in keyword_spans] + [len(self.tokens)]
+    #     rights = [span[1] for span in keyword_spans] + [len(self.tokens)]
+    #     output_tokens = []
+    #     l_index, r_index, t_index = 0, 0, 0
+    #     while(t_index < len(self.tokens)):
+    #         if r_index < len(rights) and l_index < len(lefts):
+    #             if rights[r_index] <= lefts[l_index] and rights[r_index] <= t_index:
+    #                 output_tokens.append('</Keyword>')
+    #                 r_index += 1
+    #             elif lefts[l_index] <= t_index:
+    #                 output_tokens.append('<Keyword>')
+    #                 l_index += 1
+    #             else:
+    #                 output_tokens.append(self.tokens[t_index])
+    #                 t_index += 1
+    #         else:
+    #             output_tokens.append(self.tokens[t_index])
+    #             t_index += 1
         
-        return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
+    #     return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
 
     # 直接生成 Event keywords such as ... 这样的输出
-    # def generate_keywords_output_str(self):
-    #     keywords = self.get_keywords()
-    #     output = "Event keywords such as " + ", ".join(keywords)
+    def generate_keywords_output_str(self):
+        keywords = self.get_keywords_text_span()
+        output = "Event keywords such as " + ", ".join(keywords)
         
-    #     return output, output.split(), keywords, len(keywords) != 0
+        return output, output.split(), keywords, len(keywords) != 0
     
     # # 插入 <keyword></keyword> 标签的解码方式
-    def decode_keywords(self, prediction):
-        # pred_tokens = prediction.split()
-        pred_tokens = BASIC_TOKENIZER.tokenize(prediction)
-        special_num = 0
-        pos_mapping = {}
-        for index, token in enumerate(pred_tokens):
-            if token == '<Keyword>':
-                special_num += 1
-                pos_mapping[index] = -1
-            elif token == '</Keyword>':
-                pos_mapping[index] = index - special_num
-                special_num += 1
-            else:
-                pos_mapping[index] = index - special_num
-
-        label_stack = []
-        index_stack = []
-        pred_keyword_spans = []
-        # 用 try 包裹防止出现 <Keyword> </Keyword> 嵌套错误的情况
-        try:
-            for index, token in enumerate(pred_tokens):
-                if token == '<Keyword>':
-                    label_stack.append('<Keyword>')
-                    index_stack.append(index+1)
-                elif token == '</Keyword>':
-                    if label_stack[-1] == '<Keyword>':
-                        label_stack.pop()
-                        pred_keyword_spans.append((index_stack.pop(), index))
-                    else:
-                        break
-        except:
-            pass
-        
-        keyword_spans = []
-        for span in pred_keyword_spans:
-            keyword_spans.append((pos_mapping[span[0]], pos_mapping[span[1]]))
-        
-        return keyword_spans
-
-    # 直接生成 Event keywords such as ... 的解码
     # def decode_keywords(self, prediction):
-    #     pred_keywords = []
+    #     # pred_tokens = prediction.split()
+    #     pred_tokens = BASIC_TOKENIZER.tokenize(prediction)
+    #     special_num = 0
+    #     pos_mapping = {}
+    #     for index, token in enumerate(pred_tokens):
+    #         if token == '<Keyword>':
+    #             special_num += 1
+    #             pos_mapping[index] = -1
+    #         elif token == '</Keyword>':
+    #             pos_mapping[index] = index - special_num
+    #             special_num += 1
+    #         else:
+    #             pos_mapping[index] = index - special_num
+
+    #     label_stack = []
+    #     index_stack = []
+    #     pred_keyword_spans = []
+    #     # 用 try 包裹防止出现 <Keyword> </Keyword> 嵌套错误的情况
     #     try:
-    #         pred_keywords = prediction.split("Event keywords such as ")[1]
-    #         pred_keywords = pred_keywords.split(",")
-    #         pred_keywords = [keyword.strip() for keyword in pred_keywords if keyword.strip()]
+    #         for index, token in enumerate(pred_tokens):
+    #             if token == '<Keyword>':
+    #                 label_stack.append('<Keyword>')
+    #                 index_stack.append(index+1)
+    #             elif token == '</Keyword>':
+    #                 if label_stack[-1] == '<Keyword>':
+    #                     label_stack.pop()
+    #                     pred_keyword_spans.append((index_stack.pop(), index))
+    #                 else:
+    #                     break
     #     except:
     #         pass
         
-    #     return pred_keywords
+    #     keyword_spans = []
+    #     for span in pred_keyword_spans:
+    #         keyword_spans.append((pos_mapping[span[0]], pos_mapping[span[1]]))
+        
+    #     return keyword_spans
+
+    # 直接生成 Event keywords such as ... 的解码
+    def decode_keywords(self, prediction):
+        pred_keywords = []
+        try:
+            pred_keywords = prediction.split("Event keywords such as ")[1]
+            pred_keywords = pred_keywords.split(",")
+            pred_keywords = [keyword.strip() for keyword in pred_keywords if keyword.strip()]
+        except:
+            pass
+        
+        return pred_keywords
     
     def evaluate_keywords(self, pred_spans):
         pred_spans = list(set(pred_spans))
-        # gold_spans = self.get_keywords()
-        gold_spans = self.get_keyword_spans() # <keyword></keyword> 评估
+        gold_spans = self.get_keywords_text_span()
+        # gold_spans = self.get_keyword_spans() # <keyword></keyword> 评估
         gold_num = len(gold_spans)
         pred_num = len(pred_spans)
         match_num = 0
