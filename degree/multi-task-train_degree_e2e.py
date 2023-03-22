@@ -47,7 +47,7 @@ torch.cuda.set_device(config.gpu_device)
 
 # check valid styles
 assert np.all([style in ['event_type_sent', 'keywords', 'template'] for style in config.input_style])
-assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in config.output_style])
+assert np.all([style in ['keywords_chain', 'trigger:sentence', 'argument:sentence'] for style in config.output_style])
 
 # output
 with open(os.path.join(output_dir, 'config.json'), 'w') as fp:

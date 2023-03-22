@@ -63,8 +63,8 @@ def generate_data(data_set, vocab, config, is_train=False):
         return inputs, targets, infos
 
     for data in data_set.data:
-        # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
-        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, is_train=is_train)
+        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
+        # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, is_train=is_train)
         if event_template.events:
             event_data, keyword_data = event_template.get_training_data()
             inputs_, targets_, events_ = organize_data(event_data, config)
@@ -82,7 +82,7 @@ def generate_data(data_set, vocab, config, is_train=False):
 
 # check valid styles
 assert np.all([style in ['event_type_sent', 'keywords', 'template'] for style in config.input_style])
-assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in config.output_style])
+assert np.all([style in ['keywords_chain', 'trigger:sentence', 'argument:sentence'] for style in config.output_style])
 
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.cache_dir)

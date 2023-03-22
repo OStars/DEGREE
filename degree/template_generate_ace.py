@@ -4,7 +4,7 @@ from utils import BasicTokenizer
 
 BASIC_TOKENIZER = BasicTokenizer(do_lower_case=False, never_split=["<Keyword>", "</Keyword>"])
 INPUT_STYLE_SET = ['event_type', 'event_type_sent', 'keywords', 'triggers', 'template']
-OUTPUT_STYLE_SET = ['trigger:sentence', 'argument:sentence']
+OUTPUT_STYLE_SET = ['keywords_chain', 'trigger:sentence', 'argument:sentence']
 ROLE_PH_MAP = {
     'Person': 'somebody',
     'Entity': 'some people or some organization',
@@ -175,7 +175,7 @@ class event_template():
         input_str = self.generate_input_str(query_trigger)
         if is_train:
             # 将 Event keywords such as ... 插入句子中 
-            keyword_desc = self.generate_keywords_output_str()[0]
+            keyword_desc = self.generate_natural_keywords_output_str()[0]
             input_str = input_str[:input_str.rfind('\n', 0, input_str.rfind('\n'))].strip() + ' \n ' + \
                 keyword_desc +  ' \n ' + input_str[input_str.find('\n', input_str.find('\n')+1)+1:].strip()
         output_str, gold_sample = self.generate_output_str(query_trigger)
@@ -193,6 +193,7 @@ class event_template():
         """
         input_str = self.generate_keywords_input_str()
         output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_keywords_output_str()
+        # output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_natural_keywords_output_str()
         return (input_str, output_str, gold_keywords_spans, gold_sample, self.event_type, self.tokens)
 
     def generate_keywords_input_str(self):
@@ -202,93 +203,93 @@ class event_template():
         return None
     
     # 在原句子中插入 <keyword></keyword> 标签把关键词特别标注出来
-    # def generate_keywords_output_str(self):
-    #     keyword_spans = self.get_keyword_spans()
-    #     keyword_spans = sorted(list(set(keyword_spans)), key=lambda x: x[0])
-    #     lefts = [span[0] for span in keyword_spans] + [len(self.tokens)]
-    #     rights = [span[1] for span in keyword_spans] + [len(self.tokens)]
-    #     output_tokens = []
-    #     l_index, r_index, t_index = 0, 0, 0
-    #     while(t_index < len(self.tokens)):
-    #         if r_index < len(rights) and l_index < len(lefts):
-    #             if rights[r_index] <= lefts[l_index] and rights[r_index] <= t_index:
-    #                 output_tokens.append('</Keyword>')
-    #                 r_index += 1
-    #             elif lefts[l_index] <= t_index:
-    #                 output_tokens.append('<Keyword>')
-    #                 l_index += 1
-    #             else:
-    #                 output_tokens.append(self.tokens[t_index])
-    #                 t_index += 1
-    #         else:
-    #             output_tokens.append(self.tokens[t_index])
-    #             t_index += 1
+    def generate_keywords_output_str(self):
+        keyword_spans = self.get_keyword_spans()
+        keyword_spans = sorted(list(set(keyword_spans)), key=lambda x: x[0])
+        lefts = [span[0] for span in keyword_spans] + [len(self.tokens)]
+        rights = [span[1] for span in keyword_spans] + [len(self.tokens)]
+        output_tokens = []
+        l_index, r_index, t_index = 0, 0, 0
+        while(t_index < len(self.tokens)):
+            if r_index < len(rights) and l_index < len(lefts):
+                if rights[r_index] <= lefts[l_index] and rights[r_index] <= t_index:
+                    output_tokens.append('</Keyword>')
+                    r_index += 1
+                elif lefts[l_index] <= t_index:
+                    output_tokens.append('<Keyword>')
+                    l_index += 1
+                else:
+                    output_tokens.append(self.tokens[t_index])
+                    t_index += 1
+            else:
+                output_tokens.append(self.tokens[t_index])
+                t_index += 1
         
-    #     return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
+        return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
 
     # 直接生成 Event keywords such as ... 这样的输出
-    def generate_keywords_output_str(self):
+    def generate_natural_keywords_output_str(self):
         keywords = self.get_keywords_text_span()
         output = "Event keywords such as " + ", ".join(keywords)
         
         return output, output.split(), keywords, len(keywords) != 0
     
     # # 插入 <keyword></keyword> 标签的解码方式
-    # def decode_keywords(self, prediction):
-    #     # pred_tokens = prediction.split()
-    #     pred_tokens = BASIC_TOKENIZER.tokenize(prediction)
-    #     special_num = 0
-    #     pos_mapping = {}
-    #     for index, token in enumerate(pred_tokens):
-    #         if token == '<Keyword>':
-    #             special_num += 1
-    #             pos_mapping[index] = -1
-    #         elif token == '</Keyword>':
-    #             pos_mapping[index] = index - special_num
-    #             special_num += 1
-    #         else:
-    #             pos_mapping[index] = index - special_num
-
-    #     label_stack = []
-    #     index_stack = []
-    #     pred_keyword_spans = []
-    #     # 用 try 包裹防止出现 <Keyword> </Keyword> 嵌套错误的情况
-    #     try:
-    #         for index, token in enumerate(pred_tokens):
-    #             if token == '<Keyword>':
-    #                 label_stack.append('<Keyword>')
-    #                 index_stack.append(index+1)
-    #             elif token == '</Keyword>':
-    #                 if label_stack[-1] == '<Keyword>':
-    #                     label_stack.pop()
-    #                     pred_keyword_spans.append((index_stack.pop(), index))
-    #                 else:
-    #                     break
-    #     except:
-    #         pass
-        
-    #     keyword_spans = []
-    #     for span in pred_keyword_spans:
-    #         keyword_spans.append((pos_mapping[span[0]], pos_mapping[span[1]]))
-        
-    #     return keyword_spans
-
-    # 直接生成 Event keywords such as ... 的解码
     def decode_keywords(self, prediction):
-        pred_keywords = []
+        # pred_tokens = prediction.split()
+        pred_tokens = BASIC_TOKENIZER.tokenize(prediction)
+        special_num = 0
+        pos_mapping = {}
+        for index, token in enumerate(pred_tokens):
+            if token == '<Keyword>':
+                special_num += 1
+                pos_mapping[index] = -1
+            elif token == '</Keyword>':
+                pos_mapping[index] = index - special_num
+                special_num += 1
+            else:
+                pos_mapping[index] = index - special_num
+
+        label_stack = []
+        index_stack = []
+        pred_keyword_spans = []
+        # 用 try 包裹防止出现 <Keyword> </Keyword> 嵌套错误的情况
         try:
-            pred_keywords = prediction.split("Event keywords such as ")[1]
-            pred_keywords = pred_keywords.split(",")
-            pred_keywords = [keyword.strip() for keyword in pred_keywords if keyword.strip()]
+            for index, token in enumerate(pred_tokens):
+                if token == '<Keyword>':
+                    label_stack.append('<Keyword>')
+                    index_stack.append(index+1)
+                elif token == '</Keyword>':
+                    if label_stack[-1] == '<Keyword>':
+                        label_stack.pop()
+                        pred_keyword_spans.append((index_stack.pop(), index))
+                    else:
+                        break
         except:
             pass
         
-        return pred_keywords
+        keyword_spans = []
+        for span in pred_keyword_spans:
+            keyword_spans.append((pos_mapping[span[0]], pos_mapping[span[1]]))
+        
+        return keyword_spans
+
+    # 直接生成 Event keywords such as ... 的解码
+    # def decode_keywords(self, prediction):
+    #     pred_keywords = []
+    #     try:
+    #         pred_keywords = prediction.split("Event keywords such as ")[1]
+    #         pred_keywords = pred_keywords.split(",")
+    #         pred_keywords = [keyword.strip() for keyword in pred_keywords if keyword.strip()]
+    #     except:
+    #         pass
+        
+    #     return pred_keywords
     
     def evaluate_keywords(self, pred_spans):
         pred_spans = list(set(pred_spans))
-        gold_spans = self.get_keywords_text_span()
-        # gold_spans = self.get_keyword_spans() # <keyword></keyword> 评估
+        # gold_spans = self.get_keywords_text_span()
+        gold_spans = self.get_keyword_spans() # <keyword></keyword> 评估
         gold_num = len(gold_spans)
         pred_num = len(pred_spans)
         match_num = 0
@@ -459,6 +460,9 @@ class Life_Be_Born(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -481,7 +485,8 @@ class Life_Be_Born(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -565,6 +570,9 @@ class Life_Marry(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -586,7 +594,8 @@ class Life_Marry(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -670,6 +679,9 @@ class Life_Divorce(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -692,7 +704,8 @@ class Life_Divorce(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -777,6 +790,9 @@ class Life_Injure(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -801,7 +817,8 @@ class Life_Injure(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -896,6 +913,9 @@ class Life_Die(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -920,7 +940,8 @@ class Life_Die(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1014,6 +1035,9 @@ class Movement_Transport(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1039,7 +1063,8 @@ class Movement_Transport(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1144,6 +1169,9 @@ class Transaction_Transfer_Ownership(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1173,7 +1201,8 @@ class Transaction_Transfer_Ownership(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1275,6 +1304,9 @@ class Transaction_Transfer_Money(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1303,7 +1335,8 @@ class Transaction_Transfer_Money(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1398,6 +1431,9 @@ class Business_Start_Org(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1420,7 +1456,8 @@ class Business_Start_Org(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1514,6 +1551,9 @@ class Business_Merge_Org(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1535,7 +1575,8 @@ class Business_Merge_Org(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1615,6 +1656,9 @@ class Business_Declare_Bankruptcy(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1636,7 +1680,8 @@ class Business_Declare_Bankruptcy(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1716,6 +1761,9 @@ class Business_End_Org(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1737,7 +1785,8 @@ class Business_End_Org(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1817,6 +1866,9 @@ class Conflict_Attack(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1846,7 +1898,8 @@ class Conflict_Attack(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -1947,6 +2000,9 @@ class Conflict_Demonstrate(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -1968,7 +2024,8 @@ class Conflict_Demonstrate(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2054,6 +2111,9 @@ class Contact_Meet(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2076,7 +2136,8 @@ class Contact_Meet(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2162,6 +2223,9 @@ class Contact_Phone_Write(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2184,7 +2248,8 @@ class Contact_Phone_Write(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2271,6 +2336,9 @@ class Personnel_Start_Position(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2293,7 +2361,8 @@ class Personnel_Start_Position(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2386,6 +2455,9 @@ class Personnel_End_Position(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2408,7 +2480,8 @@ class Personnel_End_Position(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2501,6 +2574,9 @@ class Personnel_Nominate(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2522,7 +2598,8 @@ class Personnel_Nominate(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2608,6 +2685,9 @@ class Personnel_Elect(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2630,7 +2710,8 @@ class Personnel_Elect(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2723,6 +2804,9 @@ class Justice_Arrest_Jail(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2745,7 +2829,8 @@ class Justice_Arrest_Jail(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2838,6 +2923,9 @@ class Justice_Release_Parole(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2860,7 +2948,8 @@ class Justice_Release_Parole(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -2952,6 +3041,9 @@ class Justice_Trial_Hearing(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -2975,7 +3067,8 @@ class Justice_Trial_Hearing(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3074,6 +3167,9 @@ class Justice_Charge_Indict(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3097,7 +3193,8 @@ class Justice_Charge_Indict(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3196,6 +3293,9 @@ class Justice_Sue(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3219,7 +3319,8 @@ class Justice_Sue(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3318,6 +3419,9 @@ class Justice_Convict(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3340,7 +3444,8 @@ class Justice_Convict(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3431,6 +3536,9 @@ class Justice_Sentence(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3453,7 +3561,8 @@ class Justice_Sentence(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3544,6 +3653,9 @@ class Justice_Fine(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3566,7 +3678,8 @@ class Justice_Fine(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3657,6 +3770,9 @@ class Justice_Execute(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3679,7 +3795,8 @@ class Justice_Execute(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3771,6 +3888,9 @@ class Justice_Extradite(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3794,7 +3914,8 @@ class Justice_Extradite(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -3895,6 +4016,9 @@ class Justice_Acquit(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -3916,7 +4040,8 @@ class Justice_Acquit(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -4000,6 +4125,9 @@ class Justice_Pardon(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -4021,7 +4149,8 @@ class Justice_Pardon(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
@@ -4105,6 +4234,9 @@ class Justice_Appeal(event_template):
         gold_sample = False
         for o_style in OUTPUT_STYLE_SET:
             if o_style in self.output_style:
+                if o_style == 'keywords_chain':
+                    output_str += ' \n {}'.format(self.generate_natural_keywords_output_str()[0])
+                    # output_str += ' \n {}'.format(self.generate_keywords_output_str()[0])
                 if o_style == 'trigger:sentence':
                     if self.trigger_text != '':
                         output_str += ' \n Event trigger is {}'.format(self.trigger_text)
@@ -4127,7 +4259,8 @@ class Justice_Appeal(event_template):
 
     def decode(self, preds):
         output = []
-        for cnt, pred in enumerate(preds.split('\n')):
+        preds = preds.split('\n')[1:] if 'keywords_chain' in self.output_style else preds.split('\n')
+        for cnt, pred in enumerate(preds):
             used_o_cnt = 0
             full_pred = pred.strip()
             for o_style in OUTPUT_STYLE_SET:
