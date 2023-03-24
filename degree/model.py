@@ -15,12 +15,14 @@ class GenerativeModel(nn.Module):
         self.tokenizer = tokenizer
         logger.info(f'Loading pre-trained model {config.model_name}')
         self.model_config =  AutoConfig.from_pretrained(config.model_name, cache_dir=config.cache_dir)
+        self.model_config.type_vocab_size = config.type_vocab_size
         self.model = AutoModelForPreTraining.from_pretrained(config.model_name, cache_dir=config.cache_dir, config=self.model_config)
         self.model.resize_token_embeddings(len(self.tokenizer))
 
     def forward(self, batch):
         outputs = self.model(input_ids=batch.enc_idxs, 
                              attention_mask=batch.enc_attn, 
+                             token_type_ids=batch.enc_type_idxs,
                              decoder_input_ids=batch.dec_idxs, 
                              decoder_attention_mask=batch.dec_attn, 
                              labels=batch.lbl_idxs, 
@@ -35,6 +37,7 @@ class GenerativeModel(nn.Module):
         with torch.no_grad():
             outputs = self.model.generate(input_ids=batch.enc_idxs, 
                                           attention_mask=batch.enc_attn, 
+                                          token_type_ids=batch.enc_type_idxs,
                                           num_beams=num_beams, 
                                           max_length=max_length)
             

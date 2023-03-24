@@ -143,6 +143,41 @@ for epoch in range(1, config.max_epoch+1):
                                             DataLoader(keyword_dev_set, batch_size=config.eval_batch_size, 
                                                  shuffle=False, collate_fn=keyword_dev_set.collate_fn))):
         progress.update(1)
+        keyword_pred_text = model.predict(keyword_batch, max_length=config.max_output_length)
+        keyword_gold_text = keyword_batch.target_text
+        keyword_input_text = keyword_batch.input_text
+        keyword_pred_objects = []
+        for i_text, g_text, p_text, info, keyword_info in zip(keyword_input_text, keyword_gold_text, keyword_pred_text, batch.infos, keyword_batch.infos):
+            theclass = getattr(sys.modules[template_file], info[1].replace(':', '_').replace('-', '_'), False)
+            assert theclass
+            template = theclass(config.input_style, config.output_style, info[2], info[1], info[0])
+            
+            # decode predictions
+            pred_object = template.decode_keywords(p_text)
+            keyword_pred_objects.append(pred_object)
+            
+            # calculate scores
+            sub_scores = template.evaluate_keywords(pred_object)
+            dev_gold_key_num += sub_scores['gold_num']
+            dev_pred_key_num += sub_scores['pred_num']
+            dev_match_key_num += sub_scores['match_num']
+            keyword_write_output.append({
+                'input text': i_text,
+                'gold text': g_text,
+                'pred text': p_text,
+                'gold keyword spans': template.get_keyword_spans(),
+                'pred keyword spans': pred_object,
+                'score': sub_scores,
+                # 'gold info': keyword_info
+            })
+
+        if 'type_vocab_size' in config:
+            enc_type_idxs = torch.zeros_like(batch.enc_type_idxs).cuda()
+            for i, keyword_spans in enumerate(keyword_pred_objects):
+                offsets = batch.offsets[i]
+                for start, end in keyword_spans:
+                    enc_type_idxs[i][offsets[start][0]:offsets[end][0]] = 1
+            batch = batch._replace(enc_type_idxs = enc_type_idxs)
         pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
         gold_text = batch.target_text
         input_text = batch.input_text
@@ -172,32 +207,6 @@ for epoch in range(1, config.max_epoch+1):
                 'pred triggers': pred_object,
                 'score': sub_scores,
                 'gold events': info[0]
-            })
-
-        keyword_pred_text = model.predict(keyword_batch, max_length=config.max_output_length)
-        keyword_gold_text = keyword_batch.target_text
-        keyword_input_text = keyword_batch.input_text
-        for i_text, g_text, p_text, info, keyword_info in zip(keyword_input_text, keyword_gold_text, keyword_pred_text, batch.infos, keyword_batch.infos):
-            theclass = getattr(sys.modules[template_file], info[1].replace(':', '_').replace('-', '_'), False)
-            assert theclass
-            template = theclass(config.input_style, config.output_style, info[2], info[1], info[0])
-            
-            # decode predictions
-            pred_object = template.decode_keywords(p_text)
-            
-            # calculate scores
-            sub_scores = template.evaluate_keywords(pred_object)
-            dev_gold_key_num += sub_scores['gold_num']
-            dev_pred_key_num += sub_scores['pred_num']
-            dev_match_key_num += sub_scores['match_num']
-            keyword_write_output.append({
-                'input text': i_text,
-                'gold text': g_text,
-                'pred text': p_text,
-                'gold keyword spans': template.get_keyword_spans(),
-                'pred keyword spans': pred_object,
-                'score': sub_scores,
-                # 'gold info': keyword_info
             })
 
     progress.close()
@@ -257,7 +266,42 @@ for epoch in range(1, config.max_epoch+1):
                                                      shuffle=False, collate_fn=test_set.collate_fn),
                                               DataLoader(keyword_test_set, batch_size=config.eval_batch_size, 
                                                      shuffle=False, collate_fn=keyword_test_set.collate_fn))):
-            progress.update(1)
+            progress.update(1)      
+            keyword_pred_text = model.predict(keyword_batch, max_length=config.max_output_length)
+            keyword_gold_text = keyword_batch.target_text
+            keyword_input_text = keyword_batch.input_text
+            keyword_pred_objects = []
+            for i_text, g_text, p_text, info, keyword_info in zip(keyword_input_text, keyword_gold_text, keyword_pred_text, batch.infos, keyword_batch.infos):
+                theclass = getattr(sys.modules[template_file], info[1].replace(':', '_').replace('-', '_'), False)
+                assert theclass
+                template = theclass(config.input_style, config.output_style, info[2], info[1], info[0])
+                
+                # decode predictions
+                pred_object = template.decode_keywords(p_text)
+                keyword_pred_objects.append(pred_object)
+                
+                # calculate scores
+                sub_scores = template.evaluate_keywords(pred_object)
+                test_gold_key_num += sub_scores['gold_num']
+                test_pred_key_num += sub_scores['pred_num']
+                test_match_key_num += sub_scores['match_num']
+                keyword_write_output.append({
+                    'input text': i_text,
+                    'gold text': g_text,
+                    'pred text': p_text,
+                    'gold keyword spans': template.get_keyword_spans(),
+                    'pred keyword spans': pred_object,
+                    'score': sub_scores,
+                    # 'gold info': keyword_info
+                })
+            
+            if 'type_vocab_size' in config:
+                enc_type_idxs = torch.zeros_like(batch.enc_type_idxs).cuda()
+                for i, keyword_spans in enumerate(keyword_pred_objects):
+                    offsets = batch.offsets[i]
+                    for start, end in keyword_spans:
+                        enc_type_idxs[i][offsets[start][0]:offsets[end][0]] = 1
+                batch = batch._replace(enc_type_idxs = enc_type_idxs)
             pred_text = model.predict(batch, num_beams=config.beam_size, max_length=config.max_output_length)
             gold_text = batch.target_text
             input_text = batch.input_text
@@ -287,32 +331,8 @@ for epoch in range(1, config.max_epoch+1):
                     'pred triggers': pred_object,
                     'score': sub_scores,
                     'gold events': info[0]
-                })      
-            keyword_pred_text = model.predict(keyword_batch, max_length=config.max_output_length)
-            keyword_gold_text = keyword_batch.target_text
-            keyword_input_text = keyword_batch.input_text
-            for i_text, g_text, p_text, info, keyword_info in zip(keyword_input_text, keyword_gold_text, keyword_pred_text, batch.infos, keyword_batch.infos):
-                theclass = getattr(sys.modules[template_file], info[1].replace(':', '_').replace('-', '_'), False)
-                assert theclass
-                template = theclass(config.input_style, config.output_style, info[2], info[1], info[0])
-                
-                # decode predictions
-                pred_object = template.decode_keywords(p_text)
-                
-                # calculate scores
-                sub_scores = template.evaluate_keywords(pred_object)
-                test_gold_key_num += sub_scores['gold_num']
-                test_pred_key_num += sub_scores['pred_num']
-                test_match_key_num += sub_scores['match_num']
-                keyword_write_output.append({
-                    'input text': i_text,
-                    'gold text': g_text,
-                    'pred text': p_text,
-                    'gold keyword spans': template.get_keyword_spans(),
-                    'pred keyword spans': pred_object,
-                    'score': sub_scores,
-                    # 'gold info': keyword_info
-                }) 
+                })
+
         progress.close()
 
         test_scores = {

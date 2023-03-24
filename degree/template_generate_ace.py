@@ -30,7 +30,7 @@ ROLE_PH_MAP = {
 }
 
 class eve_template_generator():
-    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False, is_train=False):
+    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False, tokenizer=None, is_train=False):
         """
         generate strctured information for events
         
@@ -63,7 +63,7 @@ class eve_template_generator():
                 theclass = getattr(sys.modules[__name__], event['event type'].replace(':', '_').replace('-', '_'), False)
                 assert theclass
                 self.event_templates.append(theclass(self.input_style, self.output_style, event['tokens'], event['event type'], event))
-        self.data = [x.generate_pair(x.trigger_text, is_train) for x in self.event_templates]
+        self.data = [x.generate_pair(x.trigger_text, tokenizer, is_train) for x in self.event_templates]
         self.data = [x for x in self.data if x]
         self.keyword_data = [x.generate_keyword_pair() for x in self.event_templates]
         self.keyword_data = [x for x in self.keyword_data if x]
@@ -168,7 +168,7 @@ class event_template():
 
         return list(set(keyword_spans))
 
-    def generate_pair(self, query_trigger, is_train):
+    def generate_pair(self, query_trigger, tokenizer=None, is_train=False):
         """
         Generate model input sentence and output sentence pair
         """
@@ -179,7 +179,41 @@ class event_template():
             input_str = input_str[:input_str.rfind('\n', 0, input_str.rfind('\n'))].strip() + ' \n ' + \
                 keyword_desc +  ' \n ' + input_str[input_str.find('\n', input_str.find('\n')+1)+1:].strip()
         output_str, gold_sample = self.generate_output_str(query_trigger)
-        return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens)
+        offsets = []
+        pieces = []
+        if tokenizer is not None:
+            # bart tokenizer 对空格是敏感的, 例如 'Hello' 和 ' Hello' 转换成 input_id 的结果是不一样的
+            # bart tokenizer 会将空格编码成 Ġ, 所以在用 bart tokenizer 的时候分词不能简单的按空格分词, 空格同样是重要的 token
+            l = 0
+            r = 0
+            tokens = [tokenizer.bos_token]
+            while(r != len(input_str)):
+                if input_str[r] != ' ':
+                    r += 1
+                else:
+                    tokens.append(input_str[l:r])
+                    l = r
+                    r += 1
+            tokens.append(input_str[l:r])
+            tokens.append(tokenizer.eos_token)
+            
+            for token in tokens:
+                wordpieces = tokenizer.encode_plus(
+                    token,
+                    add_special_tokens=False,
+                    return_tensors=None,
+                    return_offsets_mapping=False,
+                    return_attention_mask=False,
+                )
+                wp_ids = wordpieces["input_ids"]
+
+                if len(wp_ids) > 0:
+                    offsets.append((len(pieces), len(pieces) + len(wp_ids)))
+                    pieces.extend(wp_text for wp_text in tokenizer.convert_ids_to_tokens(wp_ids))
+                else:
+                    offsets.append(None)
+
+        return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens, "event_extraction", offsets, self.get_keyword_spans())
 
     def generate_input_str(self, query_trigger):
         return None
@@ -194,7 +228,7 @@ class event_template():
         input_str = self.generate_keywords_input_str()
         output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_keywords_output_str()
         # output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_natural_keywords_output_str()
-        return (input_str, output_str, gold_keywords_spans, gold_sample, self.event_type, self.tokens)
+        return (input_str, output_str, gold_keywords_spans, gold_sample, self.event_type, self.tokens, "keyword_extraction", None, None)
 
     def generate_keywords_input_str(self):
         # input_str = self.passage
@@ -231,6 +265,7 @@ class event_template():
     def generate_natural_keywords_output_str(self):
         keywords = self.get_keywords_text_span()
         output = "Event keywords such as " + ", ".join(keywords)
+        output = output.strip()
         
         return output, output.split(), keywords, len(keywords) != 0
     

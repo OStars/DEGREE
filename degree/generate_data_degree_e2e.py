@@ -1,5 +1,6 @@
 import os, json, pickle, logging, pprint, random
 import numpy as np
+from tqdm import tqdm
 from dataset import EEDataset
 from argparse import ArgumentParser, Namespace
 from utils import generate_vocabs
@@ -29,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(messa
 logger = logging.getLogger(__name__)
 logger.info(f"\n{pprint.pformat(vars(config), indent=4)}")
 
-def generate_data(data_set, vocab, config, is_train=False):
+def generate_data(data_set, vocab, config, tokenizer=None, is_train=False):
     inputs = []
     targets = []
     events = []
@@ -51,19 +52,19 @@ def generate_data(data_set, vocab, config, is_train=False):
         for data_ in pos_data_:
             inputs.append(data_[0])
             targets.append(data_[1])
-            infos.append((data_[2], data_[4], data_[5]))
+            infos.append((data_[2], data_[4], data_[5], data_[6], data_[7], data_[8]))
         
         neg_data_ = neg_data_[:config.n_negative]
         # neg_data_ = neg_data_[:config.n_negative] if is_train else neg_data_
         for data_ in neg_data_:
             inputs.append(data_[0])
             targets.append(data_[1])
-            infos.append((data_[2], data_[4], data_[5]))
+            infos.append((data_[2], data_[4], data_[5], data_[6], data_[7], data_[8]))
         
         return inputs, targets, infos
 
-    for data in data_set.data:
-        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True)
+    for data in tqdm(data_set.data):
+        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, tokenizer=tokenizer)
         # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, is_train=is_train)
         if event_template.events:
             event_data, keyword_data = event_template.get_training_data()
@@ -104,7 +105,7 @@ with open('{}/vocab.json'.format(config.finetune_dir), 'w') as f:
 
 # generate finetune data
 # train_inputs, train_targets, train_events = generate_data(train_set, vocab, config)
-train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config, is_train=True)
+train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config, tokenizer, is_train=True)
 logger.info(f"Generated {len(train_inputs)} training examples from {len(train_set)} instance")
 
 with open('{}/train_input.json'.format(config.finetune_dir), 'w') as f:
@@ -134,7 +135,7 @@ with open(os.path.join(config.finetune_dir, 'train_keywords_all.pkl'), 'wb') as 
     }, f)
     
 # dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config)
-dev_inputs, dev_targets, dev_events, dev_k_inputs, dev_k_targets, dev_keywords = generate_data(dev_set, vocab, config)
+dev_inputs, dev_targets, dev_events, dev_k_inputs, dev_k_targets, dev_keywords = generate_data(dev_set, vocab, config, tokenizer)
 logger.info(f"Generated {len(dev_inputs)} dev examples from {len(dev_set)} instance")
 
 with open('{}/dev_input.json'.format(config.finetune_dir), 'w') as f:
@@ -164,7 +165,7 @@ with open(os.path.join(config.finetune_dir, 'dev_keywords_all.pkl'), 'wb') as f:
     }, f)
     
 # test_inputs, test_targets, test_events = generate_data(test_set, vocab, config)
-test_inputs, test_targets, test_events, test_k_inputs, test_k_targets, test_keywords = generate_data(test_set, vocab, config)
+test_inputs, test_targets, test_events, test_k_inputs, test_k_targets, test_keywords = generate_data(test_set, vocab, config, tokenizer)
 logger.info(f"Generated {len(test_inputs)} test examples from {len(test_set)} instance")
 
 with open('{}/test_input.json'.format(config.finetune_dir), 'w') as f:

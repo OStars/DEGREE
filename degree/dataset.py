@@ -17,7 +17,7 @@ ner_batch_fields = ['input_ids', 'attention_mask', 'token_type_ids', 'mask', 'of
 NERInstance = namedtuple('NERInstance', field_names=ner_instance_fields, defaults=[None] * len(ner_instance_fields))
 NERBatch = namedtuple('NERBatch', field_names=ner_batch_fields, defaults=[None] * len(ner_batch_fields))
 
-gen_batch_fields = ['input_text', 'target_text', 'enc_idxs', 'enc_attn', 'dec_idxs', 'dec_attn', 'lbl_idxs', 'raw_lbl_idxs', 'infos']
+gen_batch_fields = ['input_text', 'target_text', 'enc_idxs', 'enc_attn', 'dec_idxs', 'dec_attn', 'lbl_idxs', 'raw_lbl_idxs', 'infos', 'enc_type_idxs', 'offsets']
 GenBatch = namedtuple('GenBatch', field_names=gen_batch_fields, defaults=[None] * len(gen_batch_fields))
 
 def remove_overlap_entities(entities):
@@ -198,7 +198,7 @@ class GenDataset(Dataset):
         self.no_bos = no_bos # if you use bart, then this should be False; if you use t5, then this should be True
         self.data = []
         self.load_data(unseen_types)
-        # self.data = self.data[:100] # FOR DEBUG
+        self.data = self.data[:100] # FOR DEBUG
 
     def __len__(self):
         return len(self.data)
@@ -230,11 +230,28 @@ class GenDataset(Dataset):
     def collate_fn(self, batch):
         input_text = [x['input'] for x in batch]
         target_text = [x['target'] for x in batch]
-        
+
         # encoder inputs
         inputs = self.tokenizer(input_text, return_tensors='pt', padding=True, max_length=self.max_length)
         enc_idxs = inputs['input_ids']
         enc_attn = inputs['attention_mask']
+
+        input_idx_lens = torch.sum((enc_idxs!=self.tokenizer.pad_token_id), dim=1).numpy().tolist()
+        if batch[0]['info'][-3] == "event_extraction":
+            offsets = [x['info'][-2] for x in batch]
+            keyword_spans = [x['info'][-1] for x in batch]
+            offsets_margins = [offset[-1][-1] for offset in offsets]
+            assert input_idx_lens == offsets_margins
+
+            enc_type_idxs = torch.zeros_like(enc_idxs)
+            for i, spans in enumerate(keyword_spans):
+                for w_start, w_end in spans:
+                    start = offsets[i][w_start][0]
+                    end = offsets[i][w_end][0]
+                    enc_type_idxs[i][start:end] = 1
+        else:
+            offsets = None
+            enc_type_idxs = None
 
         # decoder inputs
         targets = self.tokenizer(target_text, return_tensors='pt', padding=True, max_length=self.max_output_length)
@@ -256,10 +273,13 @@ class GenDataset(Dataset):
         dec_attn = dec_attn.cuda()
         raw_lbl_idxs = raw_lbl_idxs.cuda()
         lbl_idxs = lbl_idxs.cuda()
+        enc_type_idxs = enc_type_idxs.cuda() if enc_type_idxs is not None else None
         
         return GenBatch(
             input_text=input_text,
             target_text=target_text,
+            enc_type_idxs=enc_type_idxs,
+            offsets=offsets,
             enc_idxs=enc_idxs,
             enc_attn=enc_attn,
             dec_idxs=dec_idxs,
