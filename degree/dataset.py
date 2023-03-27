@@ -198,7 +198,7 @@ class GenDataset(Dataset):
         self.no_bos = no_bos # if you use bart, then this should be False; if you use t5, then this should be True
         self.data = []
         self.load_data(unseen_types)
-        self.data = self.data[:100] # FOR DEBUG
+        # self.data = self.data[:100] # FOR DEBUG
 
     def __len__(self):
         return len(self.data)
@@ -236,14 +236,14 @@ class GenDataset(Dataset):
         enc_idxs = inputs['input_ids']
         enc_attn = inputs['attention_mask']
 
-        input_idx_lens = torch.sum((enc_idxs!=self.tokenizer.pad_token_id), dim=1).numpy().tolist()
+        enc_type_idxs = torch.zeros_like(enc_idxs)
         if batch[0]['info'][-3] == "event_extraction":
             offsets = [x['info'][-2] for x in batch]
             keyword_spans = [x['info'][-1] for x in batch]
             offsets_margins = [offset[-1][-1] for offset in offsets]
+            input_idx_lens = torch.sum((enc_idxs!=self.tokenizer.pad_token_id), dim=1).numpy().tolist()
             assert input_idx_lens == offsets_margins
 
-            enc_type_idxs = torch.zeros_like(enc_idxs)
             for i, spans in enumerate(keyword_spans):
                 for w_start, w_end in spans:
                     start = offsets[i][w_start][0]
@@ -251,7 +251,7 @@ class GenDataset(Dataset):
                     enc_type_idxs[i][start:end] = 1
         else:
             offsets = None
-            enc_type_idxs = None
+            # enc_type_idxs = None
 
         # decoder inputs
         targets = self.tokenizer(target_text, return_tensors='pt', padding=True, max_length=self.max_output_length)

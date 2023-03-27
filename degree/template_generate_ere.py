@@ -1,8 +1,10 @@
 import sys
 import ipdb
+from utils import BasicTokenizer
 
+BASIC_TOKENIZER = BasicTokenizer(do_lower_case=False, never_split=["<Keyword>", "</Keyword>"])
 INPUT_STYLE_SET = ['event_type', 'event_type_sent', 'keywords', 'triggers', 'template']
-OUTPUT_STYLE_SET = ['trigger:sentence', 'argument:sentence']
+OUTPUT_STYLE_SET = ['keywords_chain', 'trigger:sentence', 'argument:sentence']
 ROLE_PH_MAP = {
     'Person': 'somebody',
     'Entity': 'some people or some organization',
@@ -27,7 +29,7 @@ ROLE_PH_MAP = {
 }
 
 class eve_template_generator():
-    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False):
+    def __init__(self, passage, triggers, roles, input_style, output_style, vocab, instance_base=False, tokenizer=None, is_train=False):
         """
         generate strctured information for events
         
@@ -60,11 +62,14 @@ class eve_template_generator():
                 theclass = getattr(sys.modules[__name__], event['event type'].replace(':', '_').replace('-', '_'), False)
                 assert theclass
                 self.event_templates.append(theclass(self.input_style, self.output_style, event['tokens'], event['event type'], event))
-        self.data = [x.generate_pair(x.trigger_text) for x in self.event_templates]
+        self.data = [x.generate_pair(x.trigger_text, tokenizer, is_train) for x in self.event_templates]
         self.data = [x for x in self.data if x]
+        self.keyword_data = [x.generate_keyword_pair() for x in self.event_templates]
+        self.keyword_data = [x for x in self.keyword_data if x]
 
     def get_training_data(self):
-        return self.data
+        # return self.data
+        return self.data, self.keyword_data
 
     def process_events(self, passage, triggers, roles):
         """
@@ -144,19 +149,193 @@ class event_template():
     def get_keywords(self):
         pass
 
-    def generate_pair(self, query_trigger):
+    def get_keywords_text_span(self):
+        keywords = []
+        if self.gold_event:
+            keywords.extend([x['trigger text'] for x in self.gold_event if x['event type']==self.event_type])
+            keywords.extend(info['argument text'] for argument in self.arguments 
+                                for _, infos in argument.items() for info in infos)
+
+        return list(set(keywords))
+
+    def get_keyword_spans(self):
+        keyword_spans = []
+        if self.gold_event:
+            keyword_spans.extend([x['trigger span'] for x in self.gold_event if x['event type']==self.event_type])
+            keyword_spans.extend(info['argument span'] for argument in self.arguments 
+                                for _, infos in argument.items() for info in infos)
+
+        return list(set(keyword_spans))
+
+    def generate_pair(self, query_trigger, tokenizer=None, is_train=False):
         """
         Generate model input sentence and output sentence pair
         """
         input_str = self.generate_input_str(query_trigger)
+        if is_train:
+            # 将 Event keywords such as ... 插入句子中 
+            keyword_desc = self.generate_natural_keywords_output_str()[0]
+            input_str = input_str[:input_str.rfind('\n', 0, input_str.rfind('\n'))].strip() + ' \n ' + \
+                keyword_desc +  ' \n ' + input_str[input_str.find('\n', input_str.find('\n')+1)+1:].strip()
         output_str, gold_sample = self.generate_output_str(query_trigger)
-        return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens)
+        offsets = []
+        pieces = []
+        if tokenizer is not None:
+            # bart tokenizer 对空格是敏感的, 例如 'Hello' 和 ' Hello' 转换成 input_id 的结果是不一样的
+            # bart tokenizer 会将空格编码成 Ġ, 所以在用 bart tokenizer 的时候分词不能简单的按空格分词, 空格同样是重要的 token
+            l = 0
+            r = 0
+            tokens = [tokenizer.bos_token]
+            while(r != len(input_str)):
+                if input_str[r] != ' ':
+                    r += 1
+                else:
+                    tokens.append(input_str[l:r])
+                    l = r
+                    r += 1
+            tokens.append(input_str[l:r])
+            tokens.append(tokenizer.eos_token)
+            
+            for token in tokens:
+                wordpieces = tokenizer.encode_plus(
+                    token,
+                    add_special_tokens=False,
+                    return_tensors=None,
+                    return_offsets_mapping=False,
+                    return_attention_mask=False,
+                )
+                wp_ids = wordpieces["input_ids"]
+
+                if len(wp_ids) > 0:
+                    offsets.append((len(pieces), len(pieces) + len(wp_ids)))
+                    pieces.extend(wp_text for wp_text in tokenizer.convert_ids_to_tokens(wp_ids))
+                else:
+                    offsets.append(None)
+
+        return (input_str, output_str, self.gold_event, gold_sample, self.event_type, self.tokens, "event_extraction", offsets, self.get_keyword_spans())
 
     def generate_input_str(self, query_trigger):
         return None
 
     def generate_output_str(self, query_trigger):
         return (None, False)
+
+    def generate_keyword_pair(self):
+        """
+        Generate model input sentence and output sentence pair
+        """
+        input_str = self.generate_keywords_input_str()
+        output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_keywords_output_str()
+        # output_str, output_tokens, gold_keywords_spans, gold_sample = self.generate_natural_keywords_output_str()
+        return (input_str, output_str, gold_keywords_spans, gold_sample, self.event_type, self.tokens, "keyword_extraction", None, None)
+
+    def generate_keywords_input_str(self):
+        # input_str = self.passage
+        # input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        # return input_str
+        return None
+    
+    # 在原句子中插入 <keyword></keyword> 标签把关键词特别标注出来
+    def generate_keywords_output_str(self):
+        keyword_spans = self.get_keyword_spans()
+        keyword_spans = sorted(list(set(keyword_spans)), key=lambda x: x[0])
+        lefts = [span[0] for span in keyword_spans] + [len(self.tokens)]
+        rights = [span[1] for span in keyword_spans] + [len(self.tokens)]
+        output_tokens = []
+        l_index, r_index, t_index = 0, 0, 0
+        while(t_index < len(self.tokens)):
+            if r_index < len(rights) and l_index < len(lefts):
+                if rights[r_index] <= lefts[l_index] and rights[r_index] <= t_index:
+                    output_tokens.append('</Keyword>')
+                    r_index += 1
+                elif lefts[l_index] <= t_index:
+                    output_tokens.append('<Keyword>')
+                    l_index += 1
+                else:
+                    output_tokens.append(self.tokens[t_index])
+                    t_index += 1
+            else:
+                output_tokens.append(self.tokens[t_index])
+                t_index += 1
+        
+        return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
+
+    # 直接生成 Event keywords such as ... 这样的输出
+    def generate_natural_keywords_output_str(self):
+        keywords = self.get_keywords_text_span()
+        output = "Event keywords such as " + ", ".join(keywords)
+        output = output.strip()
+        
+        return output, output.split(), keywords, len(keywords) != 0
+    
+    # # 插入 <keyword></keyword> 标签的解码方式
+    def decode_keywords(self, prediction):
+        # pred_tokens = prediction.split()
+        pred_tokens = BASIC_TOKENIZER.tokenize(prediction)
+        special_num = 0
+        pos_mapping = {}
+        for index, token in enumerate(pred_tokens):
+            if token == '<Keyword>':
+                special_num += 1
+                pos_mapping[index] = -1
+            elif token == '</Keyword>':
+                pos_mapping[index] = index - special_num
+                special_num += 1
+            else:
+                pos_mapping[index] = index - special_num
+
+        label_stack = []
+        index_stack = []
+        pred_keyword_spans = []
+        # 用 try 包裹防止出现 <Keyword> </Keyword> 嵌套错误的情况
+        try:
+            for index, token in enumerate(pred_tokens):
+                if token == '<Keyword>':
+                    label_stack.append('<Keyword>')
+                    index_stack.append(index+1)
+                elif token == '</Keyword>':
+                    if label_stack[-1] == '<Keyword>':
+                        label_stack.pop()
+                        pred_keyword_spans.append((index_stack.pop(), index))
+                    else:
+                        break
+        except:
+            pass
+        
+        keyword_spans = []
+        for span in pred_keyword_spans:
+            keyword_spans.append((pos_mapping[span[0]], pos_mapping[span[1]]))
+        
+        return keyword_spans
+
+    # 直接生成 Event keywords such as ... 的解码
+    # def decode_keywords(self, prediction):
+    #     pred_keywords = []
+    #     try:
+    #         pred_keywords = prediction.split("Event keywords such as ")[1]
+    #         pred_keywords = pred_keywords.split(",")
+    #         pred_keywords = [keyword.strip() for keyword in pred_keywords if keyword.strip()]
+    #     except:
+    #         pass
+        
+    #     return pred_keywords
+    
+    def evaluate_keywords(self, pred_spans):
+        pred_spans = list(set(pred_spans))
+        # gold_spans = self.get_keywords_text_span()
+        gold_spans = self.get_keyword_spans() # <keyword></keyword> 评估
+        gold_num = len(gold_spans)
+        pred_num = len(pred_spans)
+        match_num = 0
+        for pred in pred_spans:
+            if pred in gold_spans:
+                match_num += 1
+        
+        return {
+            'gold_num': gold_num,
+            'pred_num': pred_num,
+            'match_num': match_num
+        }
 
     def decode(self, prediction):
         pass
@@ -302,6 +481,13 @@ class Life_Be_Born(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to life and someone is given birth to.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -399,6 +585,13 @@ class Life_Marry(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to life and someone is married.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -499,6 +692,13 @@ class Life_Divorce(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to life and someone was divorced.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -597,6 +797,13 @@ class Life_Injure(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to life and someone is injured.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -711,6 +918,13 @@ class Life_Die(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to life and someone died.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -820,6 +1034,13 @@ class Movement_Transport_Person(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to movement. The event occurs when a person moves or is moved from one place to another.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -945,6 +1166,13 @@ class Movement_Transport_Artifact(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to movement. The event occurs when an artifact, like items or weapon, is moved from one place to another.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -1061,6 +1289,13 @@ class Transaction_Transfer_Ownership(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is events refer to the buying, selling, loaning, borrowing, giving, receiving, bartering, stealing, or renting of physical items, assets,or organizations.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -1188,6 +1423,13 @@ class Transaction_Transfer_Money(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to transaction. The event occurs when someone is giving, receiving, borrowing, or lending money.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -1301,6 +1543,13 @@ class Transaction_Transaction(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to transaction. The event occurs when someone is giving, receiving, borrowing, or lending something when you cannot tell whether it is money or an asset in the context.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -1419,6 +1668,13 @@ class Business_Start_Org(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a new organization being created.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -1528,6 +1784,13 @@ class Business_Merge_Org(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to two or more organization coming together to form a new organization.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -1620,6 +1883,13 @@ class Business_Declare_Bankruptcy(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to some organization declaring bankruptcy.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -1716,6 +1986,13 @@ class Business_End_Org(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to some organization ceasing to exist.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -1808,6 +2085,13 @@ class Conflict_Attack(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to conflict and some violent physical act.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -1933,6 +2217,13 @@ class Conflict_Demonstrate(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a large number of people coming together to protest.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -2031,6 +2322,13 @@ class Contact_Meet(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a group of people meeting and interacting with one another face-to-face.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -2134,6 +2432,13 @@ class Contact_Correspondence(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event happens when a face‐to‐face meeting between sender and receiver is not explicitly stated. This includes written, phone, or electronic communication.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -2233,6 +2538,13 @@ class Contact_Broadcast(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event happens when a person or an organization contact with the media and other publicity or announcement conference.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -2344,6 +2656,13 @@ class Contact_Contact(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event happens when there is no explicit mention of contact ways of communication.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -2443,6 +2762,13 @@ class Manufacture_Artifact(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event occurs whenever a person or an organization builds or manufactures a facility or a weapon, etc.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -2556,6 +2882,13 @@ class Personnel_Start_Position(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a person begins working for an organization or a hiring manager.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -2662,6 +2995,13 @@ class Personnel_End_Position(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a person stops working for an organization or a hiring manager.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -2772,6 +3112,13 @@ class Personnel_Nominate(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a person being nominated for a position.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -2870,6 +3217,13 @@ class Personnel_Elect(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a candidate wins an election.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -2980,6 +3334,13 @@ class Justice_Arrest_Jail(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format('The event is related to a person getting arrested or a person being sent to jail.')
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -3088,6 +3449,13 @@ class Justice_Release_Parole(event_template):
         
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to an end to someone's custody in prison.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -3193,6 +3561,13 @@ class Justice_Trial_Hearing(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to a trial or hearing for someone.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -3310,6 +3685,13 @@ class Justice_Charge_Indict(event_template):
                     input_str += ' \n {}'.format(self.output_template)
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone or some organization being accused of a crime.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -3423,6 +3805,13 @@ class Justice_Sue(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to a court proceeding that has been initiated and someone sue the other.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -3540,6 +3929,13 @@ class Justice_Convict(event_template):
                     input_str += ' \n {}'.format(self.output_template)
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being found guilty of a crime.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -3644,6 +4040,13 @@ class Justice_Sentence(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being sentences to punishment because of a crime.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -3752,6 +4155,13 @@ class Justice_Fine(event_template):
                     input_str += ' \n {}'.format(self.output_template)
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being issued a financial punishment.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -3856,6 +4266,13 @@ class Justice_Execute(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being executed to death.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -3963,6 +4380,13 @@ class Justice_Extradite(event_template):
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
         
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to justice. The event occurs when a person was extradited from one place to another place.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):
@@ -4082,6 +4506,13 @@ class Justice_Acquit(event_template):
                     input_str += ' \n {}'.format(self.output_template)
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being acquitted.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -4180,6 +4611,13 @@ class Justice_Pardon(event_template):
                     input_str += ' \n {}'.format(self.output_template)
         return input_str
 
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone being pardoned.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
+        return input_str
+
     def generate_output_str(self, query_trigger):
         assert self.gold_event is not None
         output_str = ''
@@ -4276,6 +4714,13 @@ class Justice_Appeal(event_template):
                     input_str += ' \n The event trigger word is {}'.format(query_trigger)
                 if i_style == 'template':
                     input_str += ' \n {}'.format(self.output_template)
+        return input_str
+
+    def generate_keywords_input_str(self):
+        input_str = self.passage
+        if "event_type_sent" in self.input_style:
+            input_str += ' \n {}'.format("The event is related to someone appealing the decision of a court.")
+        input_str += ' \n {}'.format("Extract keywords for " + self.event_type + " event")
         return input_str
 
     def generate_output_str(self, query_trigger):

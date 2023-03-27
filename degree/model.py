@@ -15,7 +15,8 @@ class GenerativeModel(nn.Module):
         self.tokenizer = tokenizer
         logger.info(f'Loading pre-trained model {config.model_name}')
         self.model_config =  AutoConfig.from_pretrained(config.model_name, cache_dir=config.cache_dir)
-        self.model_config.type_vocab_size = config.type_vocab_size
+        if "type_vocab_size" in config:
+            self.model_config.type_vocab_size = config.type_vocab_size
         self.model = AutoModelForPreTraining.from_pretrained(config.model_name, cache_dir=config.cache_dir, config=self.model_config)
         self.model.resize_token_embeddings(len(self.tokenizer))
 
