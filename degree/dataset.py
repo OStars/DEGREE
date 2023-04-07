@@ -236,7 +236,6 @@ class GenDataset(Dataset):
         enc_idxs = inputs['input_ids']
         enc_attn = inputs['attention_mask']
 
-        enc_type_idxs = torch.zeros_like(enc_idxs)
         if batch[0]['info'][-3] == "event_extraction":
             offsets = [x['info'][-2] for x in batch]
             keyword_spans = [x['info'][-1] for x in batch]
@@ -244,14 +243,19 @@ class GenDataset(Dataset):
             input_idx_lens = torch.sum((enc_idxs!=self.tokenizer.pad_token_id), dim=1).numpy().tolist()
             assert input_idx_lens == offsets_margins
 
+            enc_type_idxs = torch.zeros_like(enc_idxs)
             for i, spans in enumerate(keyword_spans):
                 for w_start, w_end in spans:
                     start = offsets[i][w_start][0]
                     end = offsets[i][w_end][0]
                     enc_type_idxs[i][start:end] = 1
+        elif batch[0]['info'][-3] == "keyword_extraction":
+            offsets = None
+            enc_type_idxs = torch.zeros_like(enc_idxs)
+            # enc_type_idxs = None
         else:
             offsets = None
-            # enc_type_idxs = None
+            enc_type_idxs = None
 
         # decoder inputs
         targets = self.tokenizer(target_text, return_tensors='pt', padding=True, max_length=self.max_output_length)

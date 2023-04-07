@@ -171,7 +171,7 @@ for epoch in range(1, config.max_epoch+1):
                 # 'gold info': keyword_info
             })
 
-        if 'type_vocab_size' in config:
+        if config.type_vocab_size != 0:
             enc_type_idxs = torch.zeros_like(batch.enc_type_idxs).cuda()
             for i, keyword_spans in enumerate(keyword_pred_objects):
                 offsets = batch.offsets[i]
@@ -295,7 +295,7 @@ for epoch in range(1, config.max_epoch+1):
                     # 'gold info': keyword_info
                 })
             
-            if 'type_vocab_size' in config:
+            if config.type_vocab_size != 0:
                 enc_type_idxs = torch.zeros_like(batch.enc_type_idxs).cuda()
                 for i, keyword_spans in enumerate(keyword_pred_objects):
                     offsets = batch.offsets[i]

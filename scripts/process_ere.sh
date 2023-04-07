@@ -1,4 +1,4 @@
-export ERE_PATH="../../Dataset/ERE_EN/"
+export ERE_PATH="../../datasets/ERE/"
 export OUTPUT_PATH="./processed_data/ere_bart"
 
 mkdir $OUTPUT_PATH

@@ -193,8 +193,8 @@ assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in c
               
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.cache_dir)
-special_tokens = ['<Trigger>', '<sep>']
-# special_tokens = ['<Trigger>', '<sep>', '<and>', '<Keyword>', '</Keyword>']
+# special_tokens = ['<Trigger>', '<sep>']
+special_tokens = ['<Trigger>', '<sep>', '<and>', '<Keyword>', '</Keyword>']
 tokenizer.add_tokens(special_tokens)
 
 if args.eval_batch_size:
