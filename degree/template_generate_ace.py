@@ -1,6 +1,7 @@
 import sys
 import ipdb
-from utils import BasicTokenizer
+import random
+from utils import BasicTokenizer, _is_punctuation
 
 BASIC_TOKENIZER = BasicTokenizer(do_lower_case=False, never_split=["<Keyword>", "</Keyword>"])
 INPUT_STYLE_SET = ['event_type', 'event_type_sent', 'keywords', 'triggers', 'template']
@@ -131,6 +132,7 @@ class event_template():
         self.passage = ' '.join(passage)
         self.tokens = passage
         self.event_type = event_type
+        self.candidate_spans = self.enumerate_spans(wnd_size=2)
         if gold_event is not None:
             self.gold_event = gold_event
             if isinstance(gold_event, list):
@@ -145,7 +147,17 @@ class event_template():
                 self.arguments = [gold_event['arguments']]         
         else:
             self.gold_event = None
-        
+    
+    def enumerate_spans(self, wnd_size):
+        candidate_spans = []
+        _size = 1
+        while(_size <= wnd_size):
+            for i in range(len(self.tokens) - _size + 1):
+                candidate_spans.append((i, i+_size))
+            _size += 1
+        random.shuffle(candidate_spans)
+        return candidate_spans
+
     @classmethod
     def get_keywords(self):
         pass
@@ -175,7 +187,7 @@ class event_template():
         input_str = self.generate_input_str(query_trigger)
         if is_train:
             # 将 Event keywords such as ... 插入句子中 
-            keyword_desc = self.generate_natural_keywords_output_str()[0]
+            keyword_desc = self.generate_natural_keywords_output_str(2)[0]
             input_str = input_str[:input_str.rfind('\n', 0, input_str.rfind('\n'))].strip() + ' \n ' + \
                 keyword_desc +  ' \n ' + input_str[input_str.find('\n', input_str.find('\n')+1)+1:].strip()
         output_str, gold_sample = self.generate_output_str(query_trigger)
@@ -262,8 +274,29 @@ class event_template():
         return ' '.join(output_tokens), output_tokens, keyword_spans, len(keyword_spans) != 0
 
     # 直接生成 Event keywords such as ... 这样的输出
-    def generate_natural_keywords_output_str(self):
+    def generate_natural_keywords_output_str(self, negative_samples=0):
         keywords = self.get_keywords_text_span()
+        while negative_samples:
+            actions = ["keep", "add", "remove"]
+            weights = [0.7, 0.15, 0.15]
+            action = random.choices(actions, weights, k=1)[0]
+            if action == "add":
+                max_loops = 20      # 防止死循环, 有的句子过短(极限情况下一个句子只有一个 token 且该 token 就是关键字)
+                while(max_loops):
+                    negative_span = self.candidate_spans[random.randint(0, len(self.candidate_spans)-1)]
+                    negative_target = " ".join(self.tokens[negative_span[0]:negative_span[1]])
+                    if negative_target not in keywords and (len(negative_target)!=1 or not _is_punctuation(negative_target)):
+                        keywords.append(negative_target)
+                        break
+                    else:
+                        max_loops -= 1
+            elif action == "remove" and keywords:
+                remove_target = random.randint(0, len(keywords)-1)
+                del keywords[remove_target]
+            else:
+                pass
+            negative_samples -= 1
+        random.shuffle(keywords)
         output = "Event keywords such as " + ", ".join(keywords)
         output = output.strip()
         
