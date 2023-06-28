@@ -348,11 +348,11 @@ class NERDataset(Dataset):
         events = inst['event_mentions']
         events.sort(key=lambda x: x['trigger']['start'])                
         entities = inst['entity_mentions']
-        if self.fair_compare:
-            entities, entity_id_map = remove_overlap_entities(entities)
-        else:
-            entities = entities
-            entity_id_map = {}
+        # if self.fair_compare:
+        #     entities, entity_id_map = remove_overlap_entities(entities)
+        # else:
+        entities = entities
+        entity_id_map = {}
         entities = {entity['id']: entity for entity in entities}
 
         keywords = []
@@ -363,6 +363,7 @@ class NERDataset(Dataset):
                 for arg in event['arguments']:
                     entity_id = arg['entity_id']
                     keywords.append((entities[entity_id]['start'], entities[entity_id]['end']))
+
         for keyword in keywords:
             start = keyword[0] + prompt_len
             end = keyword[1] + prompt_len

@@ -1,3 +1,5 @@
+python degree/eval_end2endEKE.py -c config/config_degree_e2e_xxx.json -e /best_model.mdl --eval_batch_size 16 --write_file /keywords_result.json --no_dev
+
 # DEGREE: A Data-Efficient Generation-Based Event Extraction Model
 
 Code for our NAACL-2022 paper [DEGREE: A Data-Efficient Generation-Based Event Extraction Model](https://arxiv.org/abs/2108.12724).

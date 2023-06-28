@@ -1380,6 +1380,7 @@ def ere_to_oneie(input_file: str,
             word pieces.
     """
     skip_num = 0
+    event_types = set()
     with open(input_file, 'r', encoding='utf-8') as r, \
         open(output_file, 'w', encoding='utf-8') as w:
         for line in r:
@@ -1447,6 +1448,8 @@ def ere_to_oneie(input_file: str,
                         'role': role_type_mapping[arg['role']]
                     } for arg in event['arguments']]
                 })
+                event_types.add(event_type_mapping['{}:{}'.format(
+                        event['event_type'], event['event_subtype'])])
 
             # coreference
             corefs = []
@@ -1504,6 +1507,8 @@ def ere_to_oneie(input_file: str,
                 'sentence_starts': inst['sentence_starts'][:-1]
             }) + '\n')
     print('#Skip: {}'.format(skip_num))
+
+    return event_types
 
 
 def split_data(input_file, output_dir, split_path):
@@ -1617,6 +1622,7 @@ def main():
         ("LDC2015E78_DEFT_Rich_ERE_Chinese_and_English_Parallel_Annotation_V2/data", "parallel")
     ]
 
+    event_types = set()
     for d_path, dataset in sub_set:
         # Convert to JSON format
         json_path = os.path.join(args.output, '{}.{}.{}.json'.format("english",
@@ -1633,7 +1639,14 @@ def main():
         oneie_path = os.path.join(args.output, '{}.{}.{}.oneie.json'.format("english",
                                                                         dataset,
                                                                         f_size))
-        ere_to_oneie(json_path, oneie_path, tokenizer=tokenizer)
+        _event_types = ere_to_oneie(json_path, oneie_path, tokenizer=tokenizer)
+        event_types.update(_event_types)
+
+    with open(os.path.join(args.output, 'etypes.json'), 'w') as fout:
+        event_types = {'Event_type': list(event_types)}
+        event_types['Keyword_type'] = ['O', 'B-keyword', 'I-keyword']
+        json.dump(event_types, fp=fout)
+
     
     if args.split:
         all_data = []

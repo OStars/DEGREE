@@ -1,4 +1,4 @@
-import json
+import os, json
 from argparse import ArgumentParser
 from transformers import BertTokenizer, RobertaTokenizer, AutoTokenizer
 
@@ -30,6 +30,7 @@ def map_decode_back_pieces(encoded_input, ori_tokens, tokenizer):
     return pieces
 
 def convert(input_file, output_file, tokenizer, window_size_=3):
+    event_types = set()
     with open(input_file, 'r', encoding='utf-8') as r, \
             open(output_file, 'w', encoding='utf-8') as w:
         for line in r:
@@ -149,6 +150,7 @@ def convert(input_file, output_file, tokenizer, window_size_=3):
                         },
                         'arguments': args_
                     }
+                    event_types.add(event_type)
                     wnd_events_.append(event_obj)
                     wnd_event_map[(trigger_start, trigger_end)] = event_obj
 
@@ -180,6 +182,8 @@ def convert(input_file, output_file, tokenizer, window_size_=3):
                 }
                 w.write(json.dumps(wnd_) + '\n')
                 offset += len(sentences[i])
+    
+    return event_types
 
 
 if __name__ == '__main__':
@@ -199,4 +203,9 @@ if __name__ == '__main__':
     else:
         bert_tokenizer = AutoTokenizer.from_pretrained(args.bert, do_lower_case=False, use_fast=False)
     
-    convert(args.input, args.output, bert_tokenizer, args.window)
+    event_types = convert(args.input, args.output, bert_tokenizer, args.window)
+
+    with open(os.path.join(args.output, 'etypes.json'), 'w') as fout:
+        event_types = {'Event_type': list(event_types)}
+        event_types['Keyword_type'] = ['O', 'B-keyword', 'I-keyword']
+        json.dump(event_types, fp=fout)

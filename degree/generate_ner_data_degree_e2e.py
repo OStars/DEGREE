@@ -1,10 +1,11 @@
-import os, json, pickle, logging, pprint, random
+import os, json, pickle, logging, pprint, random, torch
 import numpy as np
 from tqdm import tqdm
 from dataset import EEDataset
 from argparse import ArgumentParser, Namespace
 from utils import generate_vocabs
 from transformers import AutoTokenizer
+from model import NERModel
 import ipdb
 
 # configuration
@@ -30,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(messa
 logger = logging.getLogger(__name__)
 logger.info(f"\n{pprint.pformat(vars(config), indent=4)}")
 
-def generate_data(data_set, vocab, config, tokenizer=None, is_train=False):
+def generate_data(data_set, vocab, config, tokenizer=None, is_train=False, keyword_tokenizer=None, keyword_model=None, mapping=None):
     inputs = []
     targets = []
     events = []
@@ -70,7 +71,8 @@ def generate_data(data_set, vocab, config, tokenizer=None, is_train=False):
         return inputs, targets, infos
 
     for data in tqdm(data_set.data):
-        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, tokenizer=tokenizer)
+        event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, keyword_tokenizer=keyword_tokenizer, keyword_model=keyword_model, mapping=mapping)
+        # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, tokenizer=tokenizer)
         # event_template = eve_template_generator(data.tokens, data.triggers, data.roles, config.input_style, config.output_style, vocab, True, is_train=is_train)
         # if event_template.events:
         event_data, keyword_data = event_template.get_training_data()
@@ -79,16 +81,16 @@ def generate_data(data_set, vocab, config, tokenizer=None, is_train=False):
         targets.extend(targets_)
         events.extend(events_)
 
-        inputs_, targets_, keywords_ = organize_data(keyword_data, config)
-        keyword_inputs.extend(inputs_)
-        keyword_targets.extend(targets_)
-        keywords.extend(keywords_)
+        # inputs_, targets_, keywords_ = organize_data(keyword_data, config)
+        # keyword_inputs.extend(inputs_)
+        # keyword_targets.extend(targets_)
+        # keywords.extend(keywords_)
     
-    # return inputs, targets, events
-    return inputs, targets, events, keyword_inputs, keyword_targets, keywords
+    return inputs, targets, events
+    # return inputs, targets, events, keyword_inputs, keyword_targets, keywords
 
 # check valid styles
-assert np.all([style in ['event_type_sent', 'keywords', 'template'] for style in config.input_style])
+assert np.all([style in ['event_type_sent', 'keywords', 'ner_keywords', 'template'] for style in config.input_style])
 assert np.all([style in ['keywords_chain', 'trigger:sentence', 'argument:sentence'] for style in config.output_style])
 
 # tokenizer
@@ -109,10 +111,23 @@ vocab = generate_vocabs([train_set, dev_set, test_set])
 with open('{}/vocab.json'.format(config.finetune_dir), 'w') as f:
     json.dump(vocab, f, indent=4)    
 
+
+with open(os.path.join(os.path.dirname(config.train_file), "etypes.json"), 'r') as f:
+    mapping = {"id_to_keyword": {}, "keyword_to_id": {}}
+    infos = json.load(f)
+    for i, label in enumerate(infos['Keyword_type']):
+        mapping["id_to_keyword"][i] = label
+        mapping["keyword_to_id"][label] = i
+
+# Model for keyword extraction
+ner_tokenizer = AutoTokenizer.from_pretrained(config.keyword_model_name, cache_dir=config.cache_dir)
+model = NERModel(config, len(mapping['keyword_to_id']), ner_tokenizer)
+model.load_state_dict(torch.load(config.keyword_model))
+model.cuda(config.gpu_device)
+model.eval()
+
 # generate finetune data
-# train_inputs, train_targets, train_events = generate_data(train_set, vocab, config)
-train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config, is_train=True)
-# train_inputs, train_targets, train_events, train_k_inputs, train_k_targets, train_keywords = generate_data(train_set, vocab, config, tokenizer, is_train=True)
+train_inputs, train_targets, train_events = generate_data(train_set, vocab, config, keyword_tokenizer=ner_tokenizer, keyword_model=model, is_train=True, mapping=mapping)
 logger.info(f"Generated {len(train_inputs)} training examples from {len(train_set)} instance")
 
 with open('{}/train_input.json'.format(config.finetune_dir), 'w') as f:
@@ -128,22 +143,8 @@ with open('{}/train_all.pkl'.format(config.finetune_dir), 'wb') as f:
         'all': train_events
     }, f)
 
-with open(os.path.join(config.finetune_dir, 'train_keywords_input.json'), 'w') as f:
-    json.dump(train_k_inputs, f, indent=4)
-
-with open(os.path.join(config.finetune_dir, 'train_keywords_target.json'), 'w') as f:
-    json.dump(train_k_targets, f, indent=4)
-
-with open(os.path.join(config.finetune_dir, 'train_keywords_all.pkl'), 'wb') as f:
-    pickle.dump({
-        'input': train_k_inputs,
-        'target': train_k_targets,
-        'all': train_keywords
-    }, f)
     
-# dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config)
-dev_inputs, dev_targets, dev_events, dev_k_inputs, dev_k_targets, dev_keywords = generate_data(dev_set, vocab, config)
-# dev_inputs, dev_targets, dev_events, dev_k_inputs, dev_k_targets, dev_keywords = generate_data(dev_set, vocab, config, tokenizer)
+dev_inputs, dev_targets, dev_events = generate_data(dev_set, vocab, config, keyword_tokenizer=ner_tokenizer, keyword_model=model, mapping=mapping)
 logger.info(f"Generated {len(dev_inputs)} dev examples from {len(dev_set)} instance")
 
 with open('{}/dev_input.json'.format(config.finetune_dir), 'w') as f:
@@ -159,22 +160,8 @@ with open('{}/dev_all.pkl'.format(config.finetune_dir), 'wb') as f:
         'all': dev_events
     }, f)
 
-with open(os.path.join(config.finetune_dir, 'dev_keywords_input.json'), 'w') as f:
-    json.dump(dev_k_inputs, f, indent=4)
 
-with open(os.path.join(config.finetune_dir, 'dev_keywords_target.json'), 'w') as f:
-    json.dump(dev_k_targets, f, indent=4)
-
-with open(os.path.join(config.finetune_dir, 'dev_keywords_all.pkl'), 'wb') as f:
-    pickle.dump({
-        'input': dev_k_inputs,
-        'target': dev_k_targets,
-        'all': dev_keywords
-    }, f)
-    
-# test_inputs, test_targets, test_events = generate_data(test_set, vocab, config)
-test_inputs, test_targets, test_events, test_k_inputs, test_k_targets, test_keywords = generate_data(test_set, vocab, config)
-# test_inputs, test_targets, test_events, test_k_inputs, test_k_targets, test_keywords = generate_data(test_set, vocab, config, tokenizer)
+test_inputs, test_targets, test_events = generate_data(test_set, vocab, config, keyword_tokenizer=ner_tokenizer, keyword_model=model, mapping=mapping)
 logger.info(f"Generated {len(test_inputs)} test examples from {len(test_set)} instance")
 
 with open('{}/test_input.json'.format(config.finetune_dir), 'w') as f:
@@ -188,17 +175,4 @@ with open('{}/test_all.pkl'.format(config.finetune_dir), 'wb') as f:
         'input': test_inputs,
         'target': test_targets,
         'all': test_events
-    }, f)
-
-with open(os.path.join(config.finetune_dir, 'test_keywords_input.json'), 'w') as f:
-    json.dump(test_k_inputs, f, indent=4)
-
-with open(os.path.join(config.finetune_dir, 'test_keywords_target.json'), 'w') as f:
-    json.dump(test_k_targets, f, indent=4)
-
-with open(os.path.join(config.finetune_dir, 'test_keywords_all.pkl'), 'wb') as f:
-    pickle.dump({
-        'input': test_k_inputs,
-        'target': test_k_targets,
-        'all': test_keywords
     }, f)

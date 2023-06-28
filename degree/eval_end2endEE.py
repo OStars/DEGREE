@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from model import GenerativeModel
+from model import GenerativeModel, NERModel
 from dataset import GenDataset, EEDataset
 from utils import compute_f1
 from argparse import ArgumentParser, Namespace
@@ -15,6 +15,7 @@ parser.add_argument('-c', '--e2e_config', required=True)
 parser.add_argument('-e', '--e2e_model', required=True)
 parser.add_argument('--no_dev', action='store_true', default=False)
 parser.add_argument('--ic', action='store_true', default=False)
+parser.add_argument('--ner', action='store_true', default=False)
 parser.add_argument('--eval_batch_size', type=int)
 parser.add_argument('--write_file', type=str)
 args = parser.parse_args()
@@ -188,13 +189,13 @@ def cal_scores(gold_triggers, pred_triggers, gold_roles, pred_roles, all_gold_tr
 torch.cuda.set_device(config.gpu_device)
 
 # check valid styles
-assert np.all([style in ['event_type_sent', 'keywords', 'template'] for style in config.input_style])
+assert np.all([style in ['event_type_sent', 'ner_keywords', 'keywords', 'template'] for style in config.input_style])
 assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in config.output_style])
               
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained(config.model_name, cache_dir=config.cache_dir)
-# special_tokens = ['<Trigger>', '<sep>']
-special_tokens = ['<Trigger>', '<sep>', '<and>', '<Keyword>', '</Keyword>']
+special_tokens = ['<Trigger>', '<sep>']
+# special_tokens = ['<Trigger>', '<sep>', '<and>', '<Keyword>', '</Keyword>']
 tokenizer.add_tokens(special_tokens)
 
 if args.eval_batch_size:
@@ -207,6 +208,22 @@ if args.ic:
     ic_model = AutoModelForSequenceClassification.from_pretrained(config.context_model)
     ic_model.cuda(device=config.gpu_device)
     ic_model.eval()
+
+ner_tokenizer = None
+ner_model = None
+mapping = None
+if args.ner:
+    with open(os.path.join(os.path.dirname(config.train_file), "etypes.json"), 'r') as f:
+        mapping = {"id_to_keyword": {}, "keyword_to_id": {}}
+        infos = json.load(f)
+        for i, label in enumerate(infos['Keyword_type']):
+            mapping["id_to_keyword"][i] = label
+            mapping["keyword_to_id"][label] = i
+    ner_tokenizer = AutoTokenizer.from_pretrained(config.keyword_model_name, cache_dir=config.cache_dir)
+    ner_model = NERModel(config, len(mapping['keyword_to_id']), ner_tokenizer)
+    ner_model.load_state_dict(torch.load(config.keyword_model))
+    ner_model.cuda(config.gpu_device)
+    ner_model.eval()
 
 # load data
 dev_set = EEDataset(tokenizer, config.dev_file, max_length=config.max_length, ic_tokenizer=ic_tokenizer, ic_model=ic_model)
@@ -238,8 +255,8 @@ if not args.no_dev:
             
             inputs = []
             for tokens in batch.tokens:
-                template = theclass(config.input_style, config.output_style, tokens, event_type)
-                inputs.append(template.generate_input_str(''))
+                template = theclass(config.input_style, config.output_style, tokens, event_type, mapping=mapping)
+                inputs.append(template.generate_input_str('', keyword_tokenizer=ner_tokenizer, keyword_model=ner_model))
             
             inputs = tokenizer(inputs, return_tensors='pt', padding=True, max_length=config.max_length)
             enc_idxs = inputs['input_ids'].cuda()
@@ -334,8 +351,8 @@ for batch in DataLoader(test_set, batch_size=config.eval_batch_size, shuffle=Fal
         
         inputs = []
         for tokens in batch.tokens:
-            template = theclass(config.input_style, config.output_style, tokens, event_type)
-            inputs.append(template.generate_input_str(''))
+            template = theclass(config.input_style, config.output_style, tokens, event_type, mapping=mapping)
+            inputs.append(template.generate_input_str('', keyword_tokenizer=ner_tokenizer, keyword_model=ner_model))
         
         inputs = tokenizer(inputs, return_tensors='pt', padding=True, max_length=config.max_length)
         enc_idxs = inputs['input_ids'].cuda()
@@ -397,8 +414,9 @@ for batch in DataLoader(test_set, batch_size=config.eval_batch_size, shuffle=Fal
     test_gold_roles.extend(batch.roles)
     test_pred_triggers.extend(p_triggers)
     test_pred_roles.extend(p_roles)
-    for gt, gr, pt, pr, te in zip(batch.triggers, batch.roles, p_triggers, p_roles, p_texts):
+    for tokens, gt, gr, pt, pr, te in zip(batch.tokens, batch.triggers, batch.roles, p_triggers, p_roles, p_texts):
         write_object.append({
+            "input text": " ".join(tokens),
             "pred text": te,
             "pred triggers": pt,
             "gold triggers": gt,

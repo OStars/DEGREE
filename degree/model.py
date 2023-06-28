@@ -62,7 +62,10 @@ class NERModel(nn.Module):
         self.model = AutoModel.from_pretrained(config.keyword_model_name, cache_dir=config.cache_dir, config=self.model_config)
         self.model.resize_token_embeddings(len(self.tokenizer))
 
-        self.dropout = nn.Dropout(config.dropout)
+        if "dropout" in vars(config):
+            self.dropout = nn.Dropout(config.dropout)
+        else:
+            self.dropout = nn.Dropout(0.3)
         # self.birnn = nn.LSTM(self.model_config.hidden_size, self.model_config.hidden_size // 2, 
         #                      num_layers=1, bidirectional=True, batch_first=True)
 

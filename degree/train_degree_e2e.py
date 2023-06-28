@@ -46,7 +46,7 @@ summarizer = Summarizer(output_dir)
 torch.cuda.set_device(config.gpu_device)
 
 # check valid styles
-assert np.all([style in ['event_type_sent', 'keywords', 'template'] for style in config.input_style])
+assert np.all([style in ['event_type_sent', 'ner_keywords', 'keywords', 'template'] for style in config.input_style])
 assert np.all([style in ['trigger:sentence', 'argument:sentence'] for style in config.output_style])
 
 # output
